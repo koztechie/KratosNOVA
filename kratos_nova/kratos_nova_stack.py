@@ -112,31 +112,70 @@ class KratosNovaStack(Stack):
         # ================== Lambda & API Gateway Definition ================
         # =================================================================
 
-        # 1. Define the Lambda function, passing table names as environment variables
-        hello_world_lambda = _lambda.Function(
-            self, "HelloWorldFunction",
-            runtime=_lambda.Runtime.PYTHON_3_11,
-            handler="app.handler",
-            code=_lambda.Code.from_asset("src/hello_world"),
-            role=lambda_role,
-            environment={
-                "CONTRACTS_TABLE_NAME": contracts_table.table_name,
-                "SUBMISSIONS_TABLE_NAME": submissions_table.table_name,
-                "AGENTS_TABLE_NAME": agents_table.table_name,
-                "ARTIFACTS_BUCKET_NAME": artifacts_bucket.bucket_name
-            }
-        )
+        # --- Helper function to create Lambda functions ---
+        def create_lambda_function(self, name: str, handler_folder: str, role: iam.Role, environment: dict):
+            return _lambda.Function(
+                self, name,
+                runtime=_lambda.Runtime.PYTHON_3_11,
+                handler="app.handler",
+                code=_lambda.Code.from_asset(f"src/{handler_folder}"),
+                role=role,
+                environment=environment
+            )
 
-        # 2. Define the API Gateway
-        api = apigw.LambdaRestApi(
+        # --- Environment variables for all functions ---
+        lambda_environment = {
+            "CONTRACTS_TABLE_NAME": contracts_table.table_name,
+            "SUBMISSIONS_TABLE_NAME": submissions_table.table_name,
+            "AGENTS_TABLE_NAME": agents_table.table_name,
+            "ARTIFACTS_BUCKET_NAME": artifacts_bucket.bucket_name
+        }
+
+        # --- Create all Lambda functions ---
+        goals_handler = create_lambda_function(self, "GoalsHandler", "goals_manager", lambda_role, lambda_environment)
+        contracts_handler = create_lambda_function(self, "ContractsHandler", "contracts_manager", lambda_role, lambda_environment)
+        submissions_handler = create_lambda_function(self, "SubmissionsHandler", "submissions_manager", lambda_role, lambda_environment)
+        results_handler = create_lambda_function(self, "ResultsHandler", "results_manager", lambda_role, lambda_environment)
+
+
+        # --- Define the API Gateway ---
+        api = apigw.RestApi(
             self, "KratosNovaApi",
-            handler=hello_world_lambda,
-            proxy=False
+            rest_api_name="KratosNOVA Service",
+            description="API for the KratosNOVA agent economy.",
+            default_cors_preflight_options=apigw.CorsOptions(
+                allow_origins=apigw.Cors.ALL_ORIGINS,
+                allow_methods=apigw.Cors.ALL_METHODS
+            )
         )
 
-        # 3. Define the '/hello' resource and GET method
-        hello_resource = api.root.add_resource("hello")
-        hello_resource.add_method(
+        # --- Define API Resources and Methods ---
+
+        # POST /goals
+        goals_resource = api.root.add_resource("goals")
+        goals_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(goals_handler)
+        )
+
+        # GET /goals/{goal_id}
+        goal_id_resource = goals_resource.add_resource("{goal_id}")
+        goal_id_resource.add_method(
             "GET",
-            apigw.LambdaIntegration(hello_world_lambda)
+            apigw.LambdaIntegration(results_handler)
+        )
+
+        # GET /contracts
+        contracts_resource = api.root.add_resource("contracts")
+        contracts_resource.add_method(
+            "GET",
+            apigw.LambdaIntegration(contracts_handler)
+        )
+
+        # POST /contracts/{contract_id}/submissions
+        contract_id_resource = contracts_resource.add_resource("{contract_id}")
+        submissions_resource = contract_id_resource.add_resource("submissions")
+        submissions_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(submissions_handler)
         )
