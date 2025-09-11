@@ -97,6 +97,18 @@ class KratosNovaStack(Stack):
         # when we need to efficiently query all submissions for a given contract.
         # For now, we are keeping the MVP simple.
 
+        # 3. Agents Table
+        agents_table = dynamodb.Table(
+            self, "AgentsTable",
+            table_name="KratosNOVA-Agents",
+            partition_key=dynamodb.Attribute(
+                name="agent_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
         # =================================================================
 
         # =================================================================
