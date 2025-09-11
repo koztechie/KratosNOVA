@@ -109,18 +109,32 @@ class KratosNovaStack(Stack):
         agents_table.grant_read_write_data(lambda_role)
 
         # =================================================================
+        # ===================== Lambda Layer Definition ===================
+        # =================================================================
+
+        common_layer = _lambda.LayerVersion(
+            self, "CommonUtilsLayer",
+            code=_lambda.Code.from_asset("lambda_layers/common_utils"),
+            compatible_runtimes=[_lambda.Runtime.PYTHON_3_11],
+            description="A common layer for shared Python libraries like requests."
+        )
+
+        # =================================================================
+
+        # =================================================================
         # ================== Lambda & API Gateway Definition ================
         # =================================================================
 
         # --- Helper function to create Lambda functions ---
-        def create_lambda_function(self, name: str, handler_folder: str, role: iam.Role, environment: dict):
+        def create_lambda_function(self, name: str, handler_folder: str, role: iam.Role, environment: dict, layers: list): # <-- Додали layers
             return _lambda.Function(
                 self, name,
                 runtime=_lambda.Runtime.PYTHON_3_11,
                 handler="app.handler",
                 code=_lambda.Code.from_asset(f"src/{handler_folder}"),
                 role=role,
-                environment=environment
+                environment=environment,
+                layers=layers # <-- Додали цей рядок
             )
 
         # --- Environment variables for all functions ---
@@ -132,10 +146,10 @@ class KratosNovaStack(Stack):
         }
 
         # --- Create all Lambda functions ---
-        goals_handler = create_lambda_function(self, "GoalsHandler", "goals_manager", lambda_role, lambda_environment)
-        contracts_handler = create_lambda_function(self, "ContractsHandler", "contracts_manager", lambda_role, lambda_environment)
-        submissions_handler = create_lambda_function(self, "SubmissionsHandler", "submissions_manager", lambda_role, lambda_environment)
-        results_handler = create_lambda_function(self, "ResultsHandler", "results_manager", lambda_role, lambda_environment)
+        goals_handler = create_lambda_function(self, "GoalsHandler", "goals_manager", lambda_role, lambda_environment, layers=[common_layer])
+        contracts_handler = create_lambda_function(self, "ContractsHandler", "contracts_manager", lambda_role, lambda_environment, layers=[common_layer])
+        submissions_handler = create_lambda_function(self, "SubmissionsHandler", "submissions_manager", lambda_role, lambda_environment, layers=[common_layer])
+        results_handler = create_lambda_function(self, "ResultsHandler", "results_manager", lambda_role, lambda_environment, layers=[common_layer])
 
 
         # --- Define the API Gateway ---
