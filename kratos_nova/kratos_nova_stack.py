@@ -82,6 +82,21 @@ class KratosNovaStack(Stack):
             removal_policy=RemovalPolicy.DESTROY # IMPORTANT: This will delete the table when the stack is destroyed. Good for dev/hackathon, NOT for production.
         )
 
+        # 2. Submissions Table
+        submissions_table = dynamodb.Table(
+            self, "SubmissionsTable",
+            table_name="KratosNOVA-Submissions",
+            partition_key=dynamodb.Attribute(
+                name="submission_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+        # Note: We will add a Global Secondary Index (GSI) on `contract_id` later
+        # when we need to efficiently query all submissions for a given contract.
+        # For now, we are keeping the MVP simple.
+
         # =================================================================
 
         # =================================================================
