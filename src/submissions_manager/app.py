@@ -1,22 +1,30 @@
 import json
+import uuid
 
 def handler(event, context):
     """
-    A simple handler function that returns a greeting.
+    Handler for POST /contracts/{contract_id}/submissions endpoint.
+    Accepts a submission from an agent.
+    This is a mock implementation.
     """
-    print("Handler was called")
+    print(f"Received event: {json.dumps(event)}")
+    
+    contract_id = event.get("pathParameters", {}).get("contract_id", "unknown")
+
+    # TODO: Implement actual logic to save submission to DynamoDB
+
+    submission_id = f"sub-{uuid.uuid4()}"
     
     response_body = {
-        "message": "Hello, KratosNOVA!"
+        "submission_id": submission_id,
+        "message": "Submission received for contract " + contract_id
     }
     
-    response = {
-        "statusCode": 200,
+    return {
+        "statusCode": 201, # 201 Created
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*" # Required for CORS
+            "Access-Control-Allow-Origin": "*"
         },
         "body": json.dumps(response_body)
     }
-    
-    return response
