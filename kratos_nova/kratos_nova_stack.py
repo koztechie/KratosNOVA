@@ -152,6 +152,7 @@ class KratosNovaStack(Stack):
         contracts_handler = create_lambda_function(self, "ContractsHandler", "contracts_manager", lambda_role, lambda_environment, layers=[common_layer])
         submissions_handler = create_lambda_function(self, "SubmissionsHandler", "submissions_manager", lambda_role, lambda_environment, layers=[common_layer])
         results_handler = create_lambda_function(self, "ResultsHandler", "results_manager", lambda_role, lambda_environment, layers=[common_layer])
+        agents_handler = create_lambda_function(self, "AgentsHandler", "agents_manager", lambda_role, lambda_environment, layers=[common_layer])
 
 
         # --- Define the API Gateway ---
@@ -195,6 +196,14 @@ class KratosNovaStack(Stack):
             "POST",
             apigw.LambdaIntegration(submissions_handler)
         )
+
+        # POST /agents
+        agents_resource = api.root.add_resource("agents")
+        agents_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(agents_handler)
+        )
+
         # =================================================================
         # =================== CloudWatch Dashboard Definition ==============
         # =================================================================
