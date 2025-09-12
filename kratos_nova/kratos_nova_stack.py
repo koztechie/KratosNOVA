@@ -6,11 +6,13 @@ DynamoDB tables, S3 buckets, Lambda functions, and API Gateway.
 from aws_cdk import (
     Stack,
     RemovalPolicy,
+    Duration,
     aws_lambda as _lambda,
     aws_apigateway as apigw,
     aws_iam as iam,
     aws_dynamodb as dynamodb,
-    aws_s3 as s3
+    aws_s3 as s3,
+    aws_cloudwatch as cloudwatch
 )
 from constructs import Construct
 
@@ -193,3 +195,54 @@ class KratosNovaStack(Stack):
             "POST",
             apigw.LambdaIntegration(submissions_handler)
         )
+        # =================================================================
+        # =================== CloudWatch Dashboard Definition ==============
+        # =================================================================
+
+        dashboard = cloudwatch.Dashboard(
+            self, "KratosNovaDashboard",
+            dashboard_name="KratosNOVA-Monitoring"
+        )
+
+        # --- Create a title for the Lambda metrics section ---
+        dashboard.add_widgets(cloudwatch.TextWidget(
+            markdown="# KratosNOVA API Lambda Metrics",
+            width=24,
+            height=1
+        ))
+
+        # --- Create widgets for each Lambda function ---
+        lambda_functions = [
+            {"name": "GoalsHandler", "function": goals_handler},
+            {"name": "ContractsHandler", "function": contracts_handler},
+            {"name": "SubmissionsHandler", "function": submissions_handler},
+            {"name": "ResultsHandler", "function": results_handler},
+        ]
+
+        for item in lambda_functions:
+            function_name = item["name"]
+            lambda_function = item["function"]
+
+            # Invocations Widget
+            invocations_widget = cloudwatch.GraphWidget(
+                title=f"{function_name} - Invocations",
+                left=[lambda_function.metric_invocations(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                )],
+                width=12,
+                height=6
+            )
+
+            # Errors Widget
+            errors_widget = cloudwatch.GraphWidget(
+                title=f"{function_name} - Errors",
+                left=[lambda_function.metric_errors(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                )],
+                width=12,
+                height=6
+            )
+            
+            dashboard.add_widgets(invocations_widget, errors_widget)
