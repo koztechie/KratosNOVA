@@ -189,8 +189,14 @@ class KratosNovaStack(Stack):
             apigw.LambdaIntegration(contracts_handler)
         )
 
-        # POST /contracts/{contract_id}/submissions
+        # GET /contracts/{contract_id}
         contract_id_resource = contracts_resource.add_resource("{contract_id}")
+        contract_id_resource.add_method(
+            "GET",
+            apigw.LambdaIntegration(contracts_handler)
+        )
+
+        # POST /contracts/{contract_id}/submissions
         submissions_resource = contract_id_resource.add_resource("submissions")
         submissions_resource.add_method(
             "POST",
