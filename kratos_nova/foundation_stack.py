@@ -42,6 +42,15 @@ class KratosNovaFoundationStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
+        # ADD THIS BLOCK TO CREATE THE GSI
+        self.submissions_table.add_global_secondary_index(
+            index_name="contract-id-index",
+            partition_key=dynamodb.Attribute(
+                name="contract_id",
+                type=dynamodb.AttributeType.STRING
+            )
+        )
+
         self.agents_table = dynamodb.Table(
             self, "AgentsTable",
             partition_key=dynamodb.Attribute(
