@@ -12,7 +12,9 @@ from aws_cdk import (
     aws_iam as iam,
     aws_dynamodb as dynamodb,
     aws_s3 as s3,
-    aws_cloudwatch as cloudwatch
+    aws_cloudwatch as cloudwatch,
+    aws_events as events,
+    aws_events_targets as targets,
 )
 from constructs import Construct
 
@@ -221,6 +223,16 @@ class KratosNovaStack(Stack):
             apigw.LambdaIntegration(uploads_handler)
         )
 
+        # --- Create Freelancer Agent Functions ---
+        artist_agent_handler = create_lambda_function(
+            self, 
+            "ArtistAgentHandler", 
+            "agent_artist", 
+            lambda_role, 
+            lambda_environment, 
+            layers=[common_layer]
+        )
+
         # =================================================================
         # =================== CloudWatch Dashboard Definition ==============
         # =================================================================
@@ -272,3 +284,16 @@ class KratosNovaStack(Stack):
             )
             
             dashboard.add_widgets(invocations_widget, errors_widget)
+
+        # =================================================================
+        # =================== Agent Trigger Definitions ===================
+        # =================================================================
+
+        # Create an EventBridge rule to trigger the Artist Agent every 5 minutes
+        artist_rule = events.Rule(
+            self, "ArtistAgentTriggerRule",
+            schedule=events.Schedule.rate(Duration.minutes(5))
+        )
+
+        # Set the Lambda function as the target for the rule
+        artist_rule.add_target(targets.LambdaFunction(artist_agent_handler))
