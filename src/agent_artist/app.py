@@ -1,110 +1,90 @@
 """
 Lambda function for the Artist Agent.
-
-This function will be triggered to find and execute IMAGE contracts.
+This function is invoked by the orchestrator to execute IMAGE contracts.
 """
 import base64
 import json
-import uuid  # <-- ВИПРАВЛЕНО: Додано відсутній імпорт
-
+import uuid
 import boto3
+import requests
 from botocore.exceptions import ClientError
 
-# Initialize Bedrock Runtime client
+# Initialize AWS clients
 bedrock_runtime = boto3.client(service_name="bedrock-runtime")
+s3_client = boto3.client("s3")
+
+# Get config from environment variables
+API_BASE_URL = os.environ.get("API_BASE_URL")
+ARTIFACTS_BUCKET_NAME = os.environ.get("ARTIFACTS_BUCKET_NAME")
 
 
 def handler(event, context):
     """
     Main handler for the Artist Agent.
-
-    Accepts a prompt from the event and generates an image.
+    Receives a contract, generates an image, uploads it to S3,
+    and submits the result to the marketplace API.
     """
-    # The 'context' argument is unused in this simple function, which is acceptable.
     _ = context
     print(f"Artist Agent triggered with event: {json.dumps(event)}")
 
     try:
         prompt = event.get("prompt")
-        if not prompt:
-            raise ValueError("Input event must include a 'prompt' key.")
-
+        contract_id = event.get("contract_id")
+        if not prompt or not contract_id:
+            raise ValueError("Input event must include 'prompt' and 'contract_id'.")
+        
+        # 1. Generate the image
+        print("Step 1: Generating image...")
         image_bytes = generate_image(prompt)
 
-        # Use a unique name for the file in the temporary directory
-        file_path = f"/tmp/{uuid.uuid4()}.png"
-        with open(file_path, "wb") as f:
-            f.write(image_bytes)
+        # 2. Upload the image to S3
+        print("Step 2: Uploading image to S3...")
+        object_key = f"images/{contract_id}-{uuid.uuid4()}.png"
+        s3_client.put_object(
+            Bucket=ARTIFACTS_BUCKET_NAME,
+            Key=object_key,
+            Body=image_bytes,
+            ContentType="image/png"
+        )
+        print(f"Successfully uploaded to s3://{ARTIFACTS_BUCKET_NAME}/{object_key}")
 
-        print(f"Successfully generated and saved image to {file_path}")
+        # 3. Submit the result to the marketplace
+        print("Step 3: Submitting result to marketplace...")
+        submit_work(contract_id, object_key)
+        print("Submission successful.")
 
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "message": "Artist Agent successfully generated an image.",
-                "image_path": file_path
-            })
-        }
+        return {"status": "success"} # Simple response for async invocation
 
-    except (ClientError, ValueError) as e:
-        print(f"Error during image generation: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+    except (ClientError, ValueError, requests.exceptions.RequestException) as e:
+        print(f"Artist Agent failed for contract {contract_id}. Error: {e}")
+        # In async invocation, there's no one to see the return, but we log the error.
+        # For production, you'd add this failed task to a Dead Letter Queue (DLQ).
+        raise e
 
 
 def generate_image(prompt: str) -> bytes:
-    """
-    Invokes the Stability AI SDXL 1.0 model to generate an image.
-
-    Args:
-        prompt: The text prompt for image generation.
-
-    Returns:
-        The generated image as bytes.
-    """
+    # ... (код цієї функції залишається БЕЗ ЗМІН)
     model_id = "stability.stable-diffusion-xl-v1"
-
-    request_body = {
-        "text_prompts": [{"text": prompt}],
-        "cfg_scale": 7,
-        "seed": 42,
-        "steps": 30,
-        "style_preset": "digital-art",
-        "height": 1024,
-        "width": 1024
-    }
-
+    request_body = { "text_prompts": [{"text": prompt}], "cfg_scale": 7, "seed": 42, "steps": 30, "style_preset": "digital-art", "height": 1024, "width": 1024 }
     try:
-        print(f"Invoking Bedrock model {model_id}...")
-        response = bedrock_runtime.invoke_model(
-            body=json.dumps(request_body),
-            modelId=model_id,
-            accept="application/json",
-            contentType="application/json",
-        )
-        print("Successfully invoked model.")
-
+        response = bedrock_runtime.invoke_model( body=json.dumps(request_body), modelId=model_id, accept="application/json", contentType="application/json")
         response_body = json.loads(response.get("body").read())
         artifact = response_body.get("artifacts")[0]
+        if artifact.get("finishReason") == 'ERROR': raise ValueError("Image generation failed in model.")
         base64_image = artifact.get("base64")
-
-        if artifact.get("finishReason") == 'ERROR':
-            raise ValueError("Image generation failed due to an error in the model.")
-
-        print("Decoding base64 image...")
-        image_bytes = base64.b64decode(base64_image)
-        print("Successfully decoded image.")
-
-        return image_bytes
-
-    except ClientError as e:
-        error_message = f"Could not invoke model {model_id}. Error: {e}"
-        print(f"Bedrock API error: {e.response['Error']['Message']}")
-        raise ValueError(error_message) from e
-
+        return base64.b64decode(base64_image)
     except Exception as e:
-        error_message = f"An unexpected error occurred in generate_image: {e}"
-        print(error_message)
-        raise ValueError(error_message) from e
+        raise ValueError(f"Error in generate_image: {e}") from e
+
+        
+def submit_work(contract_id: str, submission_data: str):
+    """Submits the completed work via the API."""
+    submission_url = f"{API_BASE_URL}/contracts/{contract_id}/submissions"
+    payload = {
+        "agent_id": f"agent-artist-{uuid.uuid4()}", # Generate a unique ID for this instance
+        "submission_data": submission_data
+    }
+    print(f"Submitting to {submission_url} with payload: {json.dumps(payload)}")
+    response = requests.post(submission_url, json=payload, timeout=10)
+    response.raise_for_status()
+    print(f"Submission API response: {response.json()}")
