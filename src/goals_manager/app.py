@@ -86,7 +86,7 @@ def deconstruct_goal_into_contracts(goal_description: str) -> list:
     structured contracts for the KratosNOVA marketplace.
     """
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
-
+    
     # Refined prompt for better reliability and stricter output formatting
     prompt = f"""
     You are the Agent-Manager of the KratosNOVA system, a highly-structured marketplace for AI agents.
@@ -125,10 +125,26 @@ def deconstruct_goal_into_contracts(goal_description: str) -> list:
         response_body = json.loads(response.get("body").read())
         generated_text = response_body.get("content").get("text")
         
-        # Parse the JSON string from the model's response
-        parsed_response = json.loads(generated_text)
-        return parsed_response.get("contracts", [])
-    except (ClientError, json.JSONDecodeError) as e:
+        # --- Improved JSON Parsing Logic ---
+        # 1. Try to find the start of the JSON object
+        json_start_index = generated_text.find('{')
+        if json_start_index == -1:
+            raise ValueError("No JSON object found in the model's response.")
+        
+        # 2. Extract the substring from the start of the JSON
+        json_str = generated_text[json_start_index:]
+        
+        # 3. Parse the extracted JSON string
+        parsed_response = json.loads(json_str)
+        
+        # 4. Validate the structure of the parsed response
+        if "contracts" not in parsed_response or not isinstance(parsed_response["contracts"], list):
+            raise ValueError("The 'contracts' key (a list) is missing in the parsed JSON.")
+
+        return parsed_response["contracts"]
+
+    except (ClientError, json.JSONDecodeError, ValueError) as e:
+        # Consolidate error handling for this function
         print(f"Error communicating with Bedrock or parsing its response: {e}")
         raise ValueError(f"Failed to deconstruct goal. Details: {e}") from e
 
