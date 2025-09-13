@@ -14,8 +14,12 @@ lambda_client = boto3.client("lambda")
 
 # Get configuration from environment variables
 API_BASE_URL = os.environ.get("API_BASE_URL")
-ARTIST_AGENT_ARN = os.environ.get("ARTIST_AGENT_ARN")
-COPYWRITER_AGENT_ARN = os.environ.get("COPYWRITER_AGENT_ARN")
+
+# Create a mapping from contract type to Agent ARN for easy extension
+AGENT_MAPPING = {
+    "IMAGE": os.environ.get("ARTIST_AGENT_ARN"),
+    "TEXT": os.environ.get("COPYWRITER_AGENT_ARN")
+}
 
 
 def handler(event, context):
@@ -26,13 +30,12 @@ def handler(event, context):
     _ = context
     print(f"Orchestrator triggered with event: {json.dumps(event)}")
 
-    if not all([API_BASE_URL, ARTIST_AGENT_ARN, COPYWRITER_AGENT_ARN]):
+    # Validate that all required ARNs are configured
+    if not all(AGENT_MAPPING.values()) or not API_BASE_URL:
         print("Error: Missing required environment variables.")
-        # No need to raise an exception, just log and exit gracefully.
         return {"statusCode": 500, "body": "Configuration error."}
 
     try:
-        # 1. Get open contracts from the marketplace API
         contracts = get_open_contracts()
         print(f"Found {len(contracts)} open contracts.")
 
@@ -40,11 +43,7 @@ def handler(event, context):
             print("No open contracts to process.")
             return {"statusCode": 200, "body": "No open contracts found."}
 
-        # 2. Iterate and delegate tasks to specialized agents
-        delegated_tasks = 0
-        for contract in contracts:
-            delegate_task(contract)
-            delegated_tasks += 1
+        delegated_tasks = delegate_tasks(contracts)
         
         print(f"Successfully delegated {delegated_tasks} tasks.")
         return {
@@ -54,7 +53,6 @@ def handler(event, context):
 
     except (requests.exceptions.RequestException, ValueError) as e:
         print(f"Error processing contracts: {e}")
-        # Raising an exception will cause Lambda to retry if configured.
         raise e
 
 
@@ -64,7 +62,7 @@ def get_open_contracts() -> list:
     print(f"Fetching open contracts from: {contracts_url}")
     
     response = requests.get(contracts_url, timeout=10)
-    response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+    response.raise_for_status()
     
     data = response.json()
     if "contracts" not in data or not isinstance(data["contracts"], list):
@@ -73,34 +71,35 @@ def get_open_contracts() -> list:
     return data["contracts"]
 
 
-def delegate_task(contract: dict):
-    """Invokes the appropriate agent for a given contract."""
-    contract_id = contract.get("contract_id")
-    contract_type = contract.get("contract_type")
-    prompt = contract.get("description")
+def delegate_tasks(contracts: list) -> int:
+    """Iterates through contracts and invokes the appropriate agent for each."""
+    delegation_count = 0
+    for contract in contracts:
+        contract_id = contract.get("contract_id")
+        contract_type = contract.get("contract_type")
+        prompt = contract.get("description")
 
-    if not all([contract_id, contract_type, prompt]):
-        print(f"Skipping malformed contract: {contract}")
-        return
+        if not all([contract_id, contract_type, prompt]):
+            print(f"Skipping malformed contract: {contract}")
+            continue
 
-    payload = {"prompt": prompt, "contract_id": contract_id}
-    
-    target_arn = None
-    if contract_type == "IMAGE":
-        target_arn = ARTIST_AGENT_ARN
-    elif contract_type == "TEXT":
-        target_arn = COPYWRITER_AGENT_ARN
-    else:
-        print(f"Unknown contract type '{contract_type}' for contract {contract_id}. Skipping.")
-        return
+        # This is the refactored contract selection logic
+        target_arn = AGENT_MAPPING.get(contract_type)
 
-    try:
-        print(f"Delegating {contract_type} contract {contract_id} to {target_arn}")
-        lambda_client.invoke(
-            FunctionName=target_arn,
-            InvocationType="Event",  # Asynchronous invocation
-            Payload=json.dumps(payload)
-        )
-    except ClientError as e:
-        print(f"Failed to invoke agent for contract {contract_id}. Error: {e}")
-        # We log the error but don't stop the orchestrator for other contracts.
+        if not target_arn:
+            print(f"Unknown contract type '{contract_type}' for contract {contract_id}. Skipping.")
+            continue
+
+        try:
+            payload = {"prompt": prompt, "contract_id": contract_id}
+            print(f"Delegating {contract_type} contract {contract_id} to {target_arn}")
+            lambda_client.invoke(
+                FunctionName=target_arn,
+                InvocationType="Event",
+                Payload=json.dumps(payload)
+            )
+            delegation_count += 1
+        except ClientError as e:
+            print(f"Failed to invoke agent for contract {contract_id}. Error: {e}")
+
+    return delegation_count
