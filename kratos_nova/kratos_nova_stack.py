@@ -61,7 +61,7 @@ class KratosNovaStack(Stack):
             resources=[
                 f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
                 f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
-                f"arn:aws:bedrock:{self.region}::foundation-model/stability.stable-image-core-v1:0"
+                f"arn:aws:bedrock:{self.region}::foundation-model/stability.stable-diffusion-xl-v1"
             ],
             effect=iam.Effect.ALLOW
         ))
@@ -139,6 +139,19 @@ class KratosNovaStack(Stack):
                 role=role,
                 environment=environment,
                 layers=layers # <-- Додали цей рядок
+            )
+
+        # --- Helper function for AI-intensive Lambda functions ---
+        def create_ai_agent_function(self, name: str, handler_folder: str, role: iam.Role, environment: dict, layers: list):
+            return _lambda.Function(
+                self, name,
+                runtime=_lambda.Runtime.PYTHON_3_11,
+                handler="app.handler",
+                code=_lambda.Code.from_asset(f"src/{handler_folder}"),
+                role=role,
+                environment=environment,
+                layers=layers,
+                timeout=Duration.seconds(30) # <-- ВАЖЛИВА ЗМІНА!
             )
 
         # --- Environment variables for all functions ---
@@ -224,12 +237,21 @@ class KratosNovaStack(Stack):
         )
 
         # --- Create Freelancer Agent Functions ---
-        artist_agent_handler = create_lambda_function(
+        artist_agent_handler = create_ai_agent_function( # <-- ЗМІНЕНО
             self, 
             "ArtistAgentHandler", 
             "agent_artist", 
             lambda_role, 
             lambda_environment, 
+            layers=[common_layer]
+        )
+
+        copywriter_agent_handler = create_lambda_function(
+            self,
+            "CopywriterAgentHandler",
+            "agent_copywriter",
+            lambda_role,
+            lambda_environment,
             layers=[common_layer]
         )
 
@@ -297,3 +319,5 @@ class KratosNovaStack(Stack):
 
         # Set the Lambda function as the target for the rule
         artist_rule.add_target(targets.LambdaFunction(artist_agent_handler))
+        # Add the Copywriter agent as another target to the same rule
+        artist_rule.add_target(targets.LambdaFunction(copywriter_agent_handler))
