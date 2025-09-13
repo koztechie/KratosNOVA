@@ -77,6 +77,7 @@ class KratosNovaApiStack(Stack):
         results_handler = create_lambda("ResultsHandler", "results_manager")
         agents_handler = create_lambda("AgentsHandler", "agents_manager")
         uploads_handler = create_lambda("UploadsHandler", "uploads_manager")
+        critic_handler = create_lambda("CriticHandler", "agent_critic")
 
         # =================================================================
         # ================= API GATEWAY DEFINITION ========================
