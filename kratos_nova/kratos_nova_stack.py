@@ -153,7 +153,7 @@ class KratosNovaStack(Stack):
         submissions_handler = create_lambda_function(self, "SubmissionsHandler", "submissions_manager", lambda_role, lambda_environment, layers=[common_layer])
         results_handler = create_lambda_function(self, "ResultsHandler", "results_manager", lambda_role, lambda_environment, layers=[common_layer])
         agents_handler = create_lambda_function(self, "AgentsHandler", "agents_manager", lambda_role, lambda_environment, layers=[common_layer])
-
+        uploads_handler = create_lambda_function(self, "UploadsHandler", "uploads_manager", lambda_role, lambda_environment, layers=[common_layer])
 
         # --- Define the API Gateway ---
         api = apigw.RestApi(
@@ -208,6 +208,17 @@ class KratosNovaStack(Stack):
         agents_resource.add_method(
             "POST",
             apigw.LambdaIntegration(agents_handler)
+        )
+
+        # --- Handle /submissions resource ---
+        # Note: We create a top-level /submissions resource for utility endpoints like getting an upload URL.
+        submissions_root_resource = api.root.add_resource("submissions")
+
+        # POST /submissions/upload-url
+        upload_url_resource = submissions_root_resource.add_resource("upload-url")
+        upload_url_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(uploads_handler)
         )
 
         # =================================================================
