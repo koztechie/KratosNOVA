@@ -116,3 +116,8 @@ code {
   font-size: 1.2em;
   font-style: italic;
 }
+
+.processing-status {
+  font-weight: bold;
+  color: #a2d2ff; /* Світло-блакитний для акценту */
+}

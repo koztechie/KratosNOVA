@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"; // Імпортуємо useEffect
+import { useState, useEffect } from "react";
 import axios from "axios";
 import "./App.css";
 
@@ -9,26 +9,53 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const [goalId, setGoalId] = useState(null); // Новий стан для ID мети
-  const [status, setStatus] = useState("idle"); // idle, processing, completed, error
+  const [goalId, setGoalId] = useState(null);
+  const [status, setStatus] = useState("idle");
+  const [processingMessage, setProcessingMessage] = useState(""); // Новий стан для повідомлень
   const [finalResults, setFinalResults] = useState([]);
   const [error, setError] = useState("");
 
-  // Цей useEffect буде запускати полінг, коли з'являється goalId
+  // useEffect для полінгу
   useEffect(() => {
+    let intervalId = null;
     if (goalId && status === "processing") {
       console.log(`Starting polling for goalId: ${goalId}`);
-      const intervalId = setInterval(() => {
-        fetchResults(goalId);
-      }, 10000); // Опитувати кожні 10 секунд
-
-      // Функція очищення, яка зупинить полінг, якщо компонент зникне
-      return () => {
+      intervalId = setInterval(() => fetchResults(goalId), 10000);
+    }
+    return () => {
+      if (intervalId) {
         console.log("Stopping polling.");
         clearInterval(intervalId);
-      };
-    }
+      }
+    };
   }, [goalId, status]);
+
+  // НОВИЙ useEffect для оновлення повідомлень
+  useEffect(() => {
+    let timer1, timer2;
+    if (status === "processing") {
+      setProcessingMessage(
+        "Stage 1/3: Agent-Manager is deconstructing your goal..."
+      );
+      // Змінити повідомлення через 15 секунд
+      timer1 = setTimeout(() => {
+        setProcessingMessage(
+          "Stage 2/3: Freelancer Agents are working on the contracts..."
+        );
+      }, 15000); // 15 секунд
+      // Змінити повідомлення через 90 секунд
+      timer2 = setTimeout(() => {
+        setProcessingMessage(
+          "Stage 3/3: Critic Agent is evaluating the submissions..."
+        );
+      }, 90000); // 1.5 хвилини
+    }
+    // Очищення таймерів
+    return () => {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+    };
+  }, [status]);
 
   const fetchResults = async (currentGoalId) => {
     try {
@@ -115,7 +142,8 @@ function App() {
             <p>
               Your Goal ID is: <code>{goalId}</code>
             </p>
-            <p>We are checking for results automatically. Please wait...</p>
+            <p className="processing-status">{processingMessage}</p>{" "}
+            {/* Використовуємо новий стан */}
             <div className="loader"></div>
           </div>
         )}
