@@ -1,95 +1,107 @@
 """
 Lambda function for the Critic Agent.
 
-This function is responsible for evaluating submissions for a completed
-contract, selecting a winner using an LLM, and updating the system state
-in DynamoDB, including agent reputation.
+This function is triggered by a DynamoDB Stream from the Submissions table.
+It evaluates all submissions for a contract once the first submission arrives
+and updates the system state.
 """
 import json
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
+
 import boto3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 
-# Initialize AWS clients outside the handler for performance optimization
+# Initialize AWS clients
 dynamodb = boto3.resource("dynamodb")
 bedrock_runtime = boto3.client(service_name="bedrock-runtime")
 
-# Get table names from environment variables set by CDK
+# Get table names from environment variables
 CONTRACTS_TABLE_NAME = os.environ.get("CONTRACTS_TABLE_NAME")
 SUBMISSIONS_TABLE_NAME = os.environ.get("SUBMISSIONS_TABLE_NAME")
 AGENTS_TABLE_NAME = os.environ.get("AGENTS_TABLE_NAME")
+RESULTS_TABLE_NAME = os.environ.get("RESULTS_TABLE_NAME")
+
 contracts_table = dynamodb.Table(CONTRACTS_TABLE_NAME)
 submissions_table = dynamodb.Table(SUBMISSIONS_TABLE_NAME)
 agents_table = dynamodb.Table(AGENTS_TABLE_NAME)
+results_table = dynamodb.Table(RESULTS_TABLE_NAME)
 
 
 def handler(event, context):
     """
-    Main handler for the Critic Agent. Orchestrates the evaluation process.
+    Main handler for the Critic Agent, triggered by DynamoDB Streams.
     """
-    _ = context  # Acknowledge unused context argument
-    print(f"Critic Agent triggered with event: {json.dumps(event)}")
+    _ = context
+    print(f"Critic triggered by DynamoDB Stream: {json.dumps(event)}")
 
+    # A stream can deliver multiple records in one event
+    for record in event.get("Records", []):
+        # We only care about new submissions being created
+        if record.get("eventName") == "INSERT":
+            try:
+                # Extract the contract_id from the newly inserted submission item
+                new_image = record.get("dynamodb", {}).get("NewImage", {})
+                contract_id_obj = new_image.get("contract_id", {})
+                contract_id = contract_id_obj.get("S")
+
+                if contract_id:
+                    print(f"Processing new submission for contract_id: {contract_id}")
+                    # Run the full evaluation logic for this contract
+                    process_evaluation(contract_id)
+
+            except Exception as e:
+                # Log the error but don't stop processing other records
+                print(f"Error processing a stream record: {e}")
+                print(f"Problematic record: {record}")
+
+
+def process_evaluation(contract_id: str):
+    """
+    The core logic for evaluating a contract. Fetches submissions, selects
+    a winner, and updates the state of the entire system.
+    """
     try:
-        contract_id = event.get("contract_id")
-        if not contract_id:
-            raise ValueError("Input event must include a 'contract_id'.")
+        # First, check if the contract is already closed to avoid duplicate processing
+        contract = get_contract(contract_id)
+        if contract.get("status") == "CLOSED":
+            print(f"Contract {contract_id} is already closed. No action needed.")
+            return
 
         # Step 1: Fetch all submissions for the contract
         submissions = get_submissions_for_contract(contract_id)
         if not submissions:
-            print(f"No submissions found for contract {contract_id}. Marking as closed.")
-            update_contract_status(contract_id, "CLOSED")
-            return {
-                "statusCode": 200,
-                "body": json.dumps({"message": "No submissions to process. Contract closed."})
-            }
-        print(f"Found {len(submissions)} submissions for contract {contract_id}.")
+            print(f"No submissions found for contract {contract_id}. This should not happen if triggered by an insert.")
+            return
+        print(f"Found {len(submissions)} submissions for evaluation.")
 
-        # Step 2: Fetch the original contract for its description
-        contract = get_contract(contract_id)
-
-        # Step 3: Invoke Bedrock to select a winner
+        # Step 2: Invoke Bedrock to select a winner
         winning_result = select_winner(contract, submissions)
         winning_submission_id = winning_result.get("winning_submission_id")
         if not winning_submission_id:
             raise ValueError("Critic model failed to return a winning_submission_id.")
         print(f"Bedrock selected winner: {winning_submission_id}")
 
-        # Step 4: Update the system state in DynamoDB
-        print("Step 4: Updating records in DynamoDB.")
-        
-        # Find the full submission item to get the winner's agent_id
+        # Step 3: Update the system state in DynamoDB
         winner_submission_item = next(
             (sub for sub in submissions if sub.get('submission_id') == winning_submission_id),
             None
         )
-        
         if winner_submission_item:
             winning_agent_id = winner_submission_item.get("agent_id")
             update_winner_submission(winning_submission_id)
             if winning_agent_id:
                 update_agent_reputation(winning_agent_id, 1)
-        else:
-            print(f"Warning: Winning submission ID {winning_submission_id} not found "
-                  "in the fetched list. Cannot update reputation.")
+            save_final_result(contract.get("goal_id"), contract, winner_submission_item)
         
         update_contract_status(contract_id, "CLOSED")
-        print("Successfully updated DynamoDB records.")
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "message": "Successfully selected a winner and updated system state.",
-                "winning_submission_id": winning_submission_id
-            })
-        }
+        print(f"Successfully processed and closed contract {contract_id}.")
 
     except (ValueError, ClientError) as e:
-        print(f"Error processing contract evaluation: {e}")
-        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+        print(f"Error during evaluation for contract {contract_id}: {e}")
+        # For production, consider sending this to a Dead Letter Queue (DLQ)
 
 
 def get_submissions_for_contract(contract_id: str) -> list:
@@ -215,7 +227,28 @@ def update_agent_reputation(agent_id: str, score: int):
             ReturnValues="UPDATED_NEW"
         )
     except ClientError as e:
-        # It's better not to fail the whole process if reputation update fails.
-        # We just log a warning.
         print(f"Warning: Could not update reputation for agent {agent_id}. "
               f"Error: {e.response['Error']['Message']}")
+
+
+def save_final_result(goal_id: str, contract: dict, winner: dict):
+    """Saves the winning submission to the final Results table."""
+    if not goal_id:
+        print("Warning: Cannot save final result because goal_id is missing from the contract.")
+        return
+        
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        item = {
+            "goal_id": goal_id,
+            "contract_id": contract.get("contract_id"),
+            "winning_submission_id": winner.get("submission_id"),
+            "winning_agent_id": winner.get("agent_id"),
+            "submission_data": winner.get("submission_data"),
+            "contract_type": contract.get("contract_type"),
+            "evaluated_at": timestamp
+        }
+        print(f"Saving final result: {item}")
+        results_table.put_item(Item=item)
+    except ClientError as e:
+        print(f"Warning: Could not save final result. Error: {e.response['Error']['Message']}")

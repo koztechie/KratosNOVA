@@ -4,6 +4,7 @@ This function is invoked by the orchestrator to execute IMAGE contracts.
 """
 import base64
 import json
+import os
 import uuid
 import boto3
 import requests

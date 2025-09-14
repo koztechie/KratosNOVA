@@ -55,3 +55,19 @@ This document outlines the data structures for the DynamoDB tables used in the K
 | reputation     | Number          | A score representing the agent's success rate. Starts at 0.              | `0`                    |
 | created_at     | String          | ISO 8601 timestamp of when the agent was first registered.               | `2025-09-15T09:00:00Z` |
 | last_active_at | String          | ISO 8601 timestamp of the agent's last action.                           | `2025-09-15T10:02:30Z` |
+
+## 4. `Results` Table
+
+**Purpose:** Stores the final, winning results for each goal, providing a quick lookup for the user.
+
+- **Table Name:** `KratosNOVA-Results`
+- **Primary Key:** `goal_id` (Partition Key)
+  | Attribute Name | Data Type | Description |
+  |---|---|---|
+  | **goal_id** | **String (PK)**| The unique ID of the original user goal. |
+  | contract_id | String | The ID of the contract that was fulfilled. |
+  | winning_submission_id | String | The ID of the winning submission. |
+  | winning_agent_id | String | The ID of the winning agent. |
+  | submission_data | String | The actual winning content (S3 key or text). |
+  | contract_type | String | The type of the contract (`IMAGE` or `TEXT`). |
+  | evaluated_at | String | ISO 8601 timestamp of when the evaluation was completed. |

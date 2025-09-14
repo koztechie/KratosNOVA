@@ -1,15 +1,15 @@
 """
 Lambda function for the Agent-Manager.
 
-This function handles the POST /goals endpoint, deconstructs the user's goal
-into actionable contracts using a Large Language Model, and then puts those
-contracts onto the marketplace (DynamoDB).
+This function handles the POST /goals endpoint. It uses a Large Language Model
+to deconstruct a high-level user goal into a series of actionable, structured
+contracts, and then persists these contracts to the DynamoDB table, effectively
+opening them on the marketplace for freelancer agents.
 """
 import json
 import os
 import uuid
 from datetime import datetime, timezone
-
 import boto3
 from botocore.exceptions import ClientError
 
@@ -123,28 +123,23 @@ def deconstruct_goal_into_contracts(goal_description: str) -> list:
             contentType="application/json"
         )
         response_body = json.loads(response.get("body").read())
-        generated_text = response_body.get("content").get("text")
+        generated_text = response_body.get("content")[0].get("text")
         
-        # --- Improved JSON Parsing Logic ---
-        # 1. Try to find the start of the JSON object
+        # Improved JSON Parsing Logic
         json_start_index = generated_text.find('{')
         if json_start_index == -1:
             raise ValueError("No JSON object found in the model's response.")
         
-        # 2. Extract the substring from the start of the JSON
         json_str = generated_text[json_start_index:]
         
-        # 3. Parse the extracted JSON string
         parsed_response = json.loads(json_str)
         
-        # 4. Validate the structure of the parsed response
         if "contracts" not in parsed_response or not isinstance(parsed_response["contracts"], list):
             raise ValueError("The 'contracts' key (a list) is missing in the parsed JSON.")
 
         return parsed_response["contracts"]
 
     except (ClientError, json.JSONDecodeError, ValueError) as e:
-        # Consolidate error handling for this function
         print(f"Error communicating with Bedrock or parsing its response: {e}")
         raise ValueError(f"Failed to deconstruct goal. Details: {e}") from e
 

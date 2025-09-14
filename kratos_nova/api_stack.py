@@ -2,14 +2,16 @@
 AWS CDK Stack for the KratosNOVA API Layer.
 
 This stack defines the API Gateway, its Lambda handlers, and the specific
-IAM permissions required for them to function.
+IAM permissions and event sources required for them to function.
 """
 from aws_cdk import (
     Stack,
+    Duration,  # Required for setting timeouts
     aws_lambda as _lambda,
     aws_apigateway as apigw,
     aws_iam as iam
 )
+from aws_cdk.aws_lambda_event_sources import DynamoEventSource
 from constructs import Construct
 from .foundation_stack import KratosNovaFoundationStack
 
@@ -35,8 +37,9 @@ class KratosNovaApiStack(Stack):
         foundation_stack.contracts_table.grant_read_write_data(api_lambda_role)
         foundation_stack.submissions_table.grant_read_write_data(api_lambda_role)
         foundation_stack.agents_table.grant_read_write_data(api_lambda_role)
+        foundation_stack.results_table.grant_read_write_data(api_lambda_role)
 
-        # Grant permission to invoke the Bedrock model needed by the Agent-Manager
+        # Grant permission to invoke the Bedrock model needed by the Agent-Manager & Critic
         api_lambda_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
             resources=[
@@ -61,23 +64,37 @@ class KratosNovaApiStack(Stack):
             "CONTRACTS_TABLE_NAME": foundation_stack.contracts_table.table_name,
             "SUBMISSIONS_TABLE_NAME": foundation_stack.submissions_table.table_name,
             "AGENTS_TABLE_NAME": foundation_stack.agents_table.table_name,
-            "ARTIFACTS_BUCKET_NAME": foundation_stack.artifacts_bucket.bucket_name
+            "ARTIFACTS_BUCKET_NAME": foundation_stack.artifacts_bucket.bucket_name,
+            "RESULTS_TABLE_NAME": foundation_stack.results_table.table_name
         }
 
-        def create_lambda(name, folder):
+        # Helper function with a default timeout that can be overridden
+        def create_lambda(name, folder, timeout=Duration.seconds(3)):
             return _lambda.Function(
                 self, name, runtime=_lambda.Runtime.PYTHON_3_11, handler="app.handler",
                 code=_lambda.Code.from_asset(f"src/{folder}"), role=api_lambda_role,
-                environment=api_lambda_env, layers=[self.common_layer]
+                environment=api_lambda_env, layers=[self.common_layer], timeout=timeout
             )
 
-        goals_handler = create_lambda("GoalsHandler", "goals_manager")
+        # Create Lambda functions, specifying longer timeouts for LLM-intensive tasks
+        goals_handler = create_lambda(
+            "GoalsHandler", "goals_manager", timeout=Duration.seconds(30)
+        )
         contracts_handler = create_lambda("ContractsHandler", "contracts_manager")
         submissions_handler = create_lambda("SubmissionsHandler", "submissions_manager")
         results_handler = create_lambda("ResultsHandler", "results_manager")
         agents_handler = create_lambda("AgentsHandler", "agents_manager")
         uploads_handler = create_lambda("UploadsHandler", "uploads_manager")
-        critic_handler = create_lambda("CriticHandler", "agent_critic")
+        critic_handler = create_lambda(
+            "CriticHandler", "agent_critic", timeout=Duration.seconds(60)
+        )
+
+        # --- Critic Trigger: DynamoDB Stream from Submissions Table ---
+        critic_handler.add_event_source(DynamoEventSource(
+            foundation_stack.submissions_table,
+            starting_position=_lambda.StartingPosition.LATEST,
+            batch_size=1
+        ))
 
         # =================================================================
         # ================= API GATEWAY DEFINITION ========================
