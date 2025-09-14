@@ -2,26 +2,65 @@ import { useState, useEffect } from "react";
 import axios from "axios";
 import "./App.css";
 
+// Get the API base URL from environment variables
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+
+// Create a pre-configured axios instance for API calls
 const apiClient = axios.create({ baseURL: API_BASE_URL });
 
+/**
+ * A dedicated component to fetch and display an image from a private S3 bucket
+ * using a presigned URL.
+ * @param {{s3Key: string}} props - The S3 object key for the image.
+ */
+function ResultImage({ s3Key }) {
+  const [imageUrl, setImageUrl] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const fetchUrl = async () => {
+      if (!s3Key) return;
+      try {
+        const response = await apiClient.get("/submissions/download-url", {
+          params: { key: s3Key },
+        });
+        setImageUrl(response.data.download_url);
+      } catch (err) {
+        console.error("Failed to get download URL for key:", s3Key, err);
+        setError("Could not load image.");
+      }
+    };
+    fetchUrl();
+  }, [s3Key]); // This effect runs whenever the s3Key changes
+
+  if (error) return <p className="result-error">{error}</p>;
+  if (!imageUrl) return <p>Loading image...</p>;
+
+  return (
+    <img src={imageUrl} alt="Generated Artwork" className="result-image" />
+  );
+}
+
 function App() {
+  // State for the input form
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
+  // State for tracking the lifecycle of a goal
   const [goalId, setGoalId] = useState(null);
-  const [status, setStatus] = useState("idle");
-  const [processingMessage, setProcessingMessage] = useState(""); // Новий стан для повідомлень
+  const [status, setStatus] = useState("idle"); // 'idle', 'processing', 'completed', 'error'
+  const [processingMessage, setProcessingMessage] = useState("");
   const [finalResults, setFinalResults] = useState([]);
   const [error, setError] = useState("");
 
-  // useEffect для полінгу
+  // Effect to handle polling for results when a goal is processing
   useEffect(() => {
     let intervalId = null;
     if (goalId && status === "processing") {
       console.log(`Starting polling for goalId: ${goalId}`);
-      intervalId = setInterval(() => fetchResults(goalId), 10000);
+      intervalId = setInterval(() => fetchResults(goalId), 10000); // Poll every 10 seconds
     }
+    // Cleanup function to stop polling when the component unmounts or status changes
     return () => {
       if (intervalId) {
         console.log("Stopping polling.");
@@ -30,33 +69,32 @@ function App() {
     };
   }, [goalId, status]);
 
-  // НОВИЙ useEffect для оновлення повідомлень
+  // Effect to update the user-facing status message during processing
   useEffect(() => {
     let timer1, timer2;
     if (status === "processing") {
       setProcessingMessage(
         "Stage 1/3: Agent-Manager is deconstructing your goal..."
       );
-      // Змінити повідомлення через 15 секунд
       timer1 = setTimeout(() => {
         setProcessingMessage(
           "Stage 2/3: Freelancer Agents are working on the contracts..."
         );
-      }, 15000); // 15 секунд
-      // Змінити повідомлення через 90 секунд
+      }, 15000); // 15 seconds
       timer2 = setTimeout(() => {
         setProcessingMessage(
           "Stage 3/3: Critic Agent is evaluating the submissions..."
         );
-      }, 90000); // 1.5 хвилини
+      }, 90000); // 1.5 minutes
     }
-    // Очищення таймерів
+    // Cleanup function to clear timers if the process finishes early
     return () => {
       clearTimeout(timer1);
       clearTimeout(timer2);
     };
   }, [status]);
 
+  // Fetches the results for a given goal ID
   const fetchResults = async (currentGoalId) => {
     try {
       console.log(`Polling for results of goal: ${currentGoalId}`);
@@ -74,9 +112,11 @@ function App() {
     }
   };
 
+  // Handles the submission of the initial goal
   const handleSubmit = async () => {
-    if (!prompt || isLoading) return;
+    if (!prompt.trim() || isLoading) return;
 
+    // Reset state for a new submission
     setIsLoading(true);
     setError("");
     setFinalResults([]);
@@ -142,8 +182,7 @@ function App() {
             <p>
               Your Goal ID is: <code>{goalId}</code>
             </p>
-            <p className="processing-status">{processingMessage}</p>{" "}
-            {/* Використовуємо новий стан */}
+            <p className="processing-status">{processingMessage}</p>
             <div className="loader"></div>
           </div>
         )}
@@ -158,11 +197,7 @@ function App() {
                     : "Generated Slogan"}
                 </h4>
                 {result.contract_type === "IMAGE" ? (
-                  <p>
-                    <i>(Image will be displayed here in the next step)</i>
-                    <br />
-                    S3 Key: <code>{result.submission_data}</code>
-                  </p>
+                  <ResultImage s3Key={result.submission_data} />
                 ) : (
                   <p className="slogan">"{result.submission_data}"</p>
                 )}

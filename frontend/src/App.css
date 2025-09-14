@@ -121,3 +121,9 @@ code {
   font-weight: bold;
   color: #a2d2ff; /* Світло-блакитний для акценту */
 }
+
+.result-image {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-top: 1rem;
+}

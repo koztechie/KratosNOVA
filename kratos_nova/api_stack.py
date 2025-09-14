@@ -21,6 +21,28 @@ class KratosNovaApiStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # =================================================================
+        # ===================== FRONTEND HOSTING BUCKET ===================
+        # =================================================================
+
+        # Create an S3 bucket to host the static React frontend
+        frontend_bucket = s3.Bucket(
+            self, "FrontendBucket",
+            # bucket_name will be auto-generated for global uniqueness
+            public_read_access=True,  # Allow public access to read objects
+            website_index_document="index.html", # Set the default document
+            website_error_document="index.html", # Redirect errors to the main app for client-side routing
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True
+        )
+
+        # Output the website URL for easy access
+        cdk.CfnOutput(
+            self, "FrontendURL",
+            value=frontend_bucket.bucket_website_url,
+            description="The URL of the deployed frontend application."
+        )
+
+        # =================================================================
         # ==================== IAM ROLE FOR API HANDLERS ==================
         # =================================================================
         api_lambda_role = iam.Role(
@@ -126,5 +148,14 @@ class KratosNovaApiStack(Stack):
         agents_resource.add_method("POST", apigw.LambdaIntegration(agents_handler))
         
         submissions_root_resource = self.api.root.add_resource("submissions")
+
+        # POST /submissions/upload-url (існуючий)
         upload_url_resource = submissions_root_resource.add_resource("upload-url")
         upload_url_resource.add_method("POST", apigw.LambdaIntegration(uploads_handler))
+
+        # НОВИЙ ЕНДПОІНТ: GET /submissions/download-url?key=...
+        download_url_resource = submissions_root_resource.add_resource("download-url")
+        download_url_resource.add_method(
+            "GET",
+            apigw.LambdaIntegration(uploads_handler)
+        )
