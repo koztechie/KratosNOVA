@@ -141,7 +141,7 @@ function App() {
   return (
     <div className="container">
       <header>
-        <h1>KratosNOVA 🚀</h1>
+        <h1>KratosNOVA 🚀!</h1>
         <p>The Autonomous AI Agent Economy</p>
       </header>
 
