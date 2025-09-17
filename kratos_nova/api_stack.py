@@ -1,15 +1,20 @@
 """
 AWS CDK Stack for the KratosNOVA API Layer.
 
-This stack defines the API Gateway, its Lambda handlers, and the specific
-IAM permissions and event sources required for them to function.
+This stack defines the API Gateway, its Lambda handlers, the UI hosting bucket,
+and the specific IAM permissions and event sources required for them to function.
 """
 from aws_cdk import (
     Stack,
-    Duration,  # Required for setting timeouts
+    Duration,
+    RemovalPolicy,
+    CfnOutput,  # <-- ВИПРАВЛЕНО: Додано імпорт CfnOutput
     aws_lambda as _lambda,
     aws_apigateway as apigw,
-    aws_iam as iam
+    aws_iam as iam,
+    aws_s3 as s3,  # <-- ВИПРАВЛЕНО: Додано імпорт s3
+    aws_cloudfront as cloudfront, # <-- ДОДАЙТЕ ЦЕЙ РЯДОК
+    aws_cloudfront_origins as origins # <-- ДОДАЙТЕ ЦЕЙ РЯДОК
 )
 from aws_cdk.aws_lambda_event_sources import DynamoEventSource
 from constructs import Construct
@@ -21,28 +26,6 @@ class KratosNovaApiStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # =================================================================
-        # ===================== FRONTEND HOSTING BUCKET ===================
-        # =================================================================
-
-        # Create an S3 bucket to host the static React frontend
-        frontend_bucket = s3.Bucket(
-            self, "FrontendBucket",
-            # bucket_name will be auto-generated for global uniqueness
-            public_read_access=True,  # Allow public access to read objects
-            website_index_document="index.html", # Set the default document
-            website_error_document="index.html", # Redirect errors to the main app for client-side routing
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True
-        )
-
-        # Output the website URL for easy access
-        cdk.CfnOutput(
-            self, "FrontendURL",
-            value=frontend_bucket.bucket_website_url,
-            description="The URL of the deployed frontend application."
-        )
-
-        # =================================================================
         # ==================== IAM ROLE FOR API HANDLERS ==================
         # =================================================================
         api_lambda_role = iam.Role(
@@ -51,17 +34,17 @@ class KratosNovaApiStack(Stack):
             description="Role for KratosNOVA API handler Lambda functions"
         )
         api_lambda_role.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSLambdaBasicExecutionRole"
+            )
         )
         
-        # Grant permissions to access foundational resources
         foundation_stack.artifacts_bucket.grant_read_write(api_lambda_role)
         foundation_stack.contracts_table.grant_read_write_data(api_lambda_role)
         foundation_stack.submissions_table.grant_read_write_data(api_lambda_role)
         foundation_stack.agents_table.grant_read_write_data(api_lambda_role)
         foundation_stack.results_table.grant_read_write_data(api_lambda_role)
 
-        # Grant permission to invoke the Bedrock model needed by the Agent-Manager & Critic
         api_lambda_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
             resources=[
@@ -90,15 +73,13 @@ class KratosNovaApiStack(Stack):
             "RESULTS_TABLE_NAME": foundation_stack.results_table.table_name
         }
 
-        # Helper function with a default timeout that can be overridden
-        def create_lambda(name, folder, timeout=Duration.seconds(3)):
+        def create_lambda(name, folder, timeout=Duration.seconds(5)):
             return _lambda.Function(
                 self, name, runtime=_lambda.Runtime.PYTHON_3_11, handler="app.handler",
                 code=_lambda.Code.from_asset(f"src/{folder}"), role=api_lambda_role,
                 environment=api_lambda_env, layers=[self.common_layer], timeout=timeout
             )
 
-        # Create Lambda functions, specifying longer timeouts for LLM-intensive tasks
         goals_handler = create_lambda(
             "GoalsHandler", "goals_manager", timeout=Duration.seconds(30)
         )
@@ -111,7 +92,6 @@ class KratosNovaApiStack(Stack):
             "CriticHandler", "agent_critic", timeout=Duration.seconds(60)
         )
 
-        # --- Critic Trigger: DynamoDB Stream from Submissions Table ---
         critic_handler.add_event_source(DynamoEventSource(
             foundation_stack.submissions_table,
             starting_position=_lambda.StartingPosition.LATEST,
@@ -131,7 +111,6 @@ class KratosNovaApiStack(Stack):
             )
         )
         
-        # --- API Resources and Methods ---
         goals_resource = self.api.root.add_resource("goals")
         goals_resource.add_method("POST", apigw.LambdaIntegration(goals_handler))
         goal_id_resource = goals_resource.add_resource("{goal_id}")
@@ -148,14 +127,59 @@ class KratosNovaApiStack(Stack):
         agents_resource.add_method("POST", apigw.LambdaIntegration(agents_handler))
         
         submissions_root_resource = self.api.root.add_resource("submissions")
-
-        # POST /submissions/upload-url (існуючий)
         upload_url_resource = submissions_root_resource.add_resource("upload-url")
         upload_url_resource.add_method("POST", apigw.LambdaIntegration(uploads_handler))
-
-        # НОВИЙ ЕНДПОІНТ: GET /submissions/download-url?key=...
         download_url_resource = submissions_root_resource.add_resource("download-url")
-        download_url_resource.add_method(
-            "GET",
-            apigw.LambdaIntegration(uploads_handler)
+        download_url_resource.add_method("GET", apigw.LambdaIntegration(uploads_handler))
+
+        # =================================================================
+        # ===================== FRONTEND HOSTING ==========================
+        # =================================================================
+
+        # 1. Create a private S3 bucket for the frontend assets
+        frontend_bucket = s3.Bucket(
+            self, "FrontendBucket",
+            # Bucket is private, access will be granted only to CloudFront
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True
+        )
+
+        # 2. Create an Origin Access Identity (OAI) for CloudFront
+        # This acts as a "special user" that CloudFront can use to access the S3 bucket
+        origin_access_identity = cloudfront.OriginAccessIdentity(
+            self, "FrontendOAI",
+            comment="OAI for KratosNOVA frontend"
+        )
+
+        # 3. Grant the OAI permission to read from the bucket
+        frontend_bucket.grant_read(origin_access_identity)
+
+        # 4. Create the CloudFront distribution
+        distribution = cloudfront.Distribution(
+            self, "FrontendDistribution",
+            default_behavior=cloudfront.BehaviorOptions(
+                # Use the S3 bucket as the origin, but specify the OAI
+                origin=origins.S3Origin(
+                    frontend_bucket,
+                    origin_access_identity=origin_access_identity
+                ),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                compress=True
+            ),
+            default_root_object="index.html",
+            error_responses=[
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html"
+                )
+            ]
+        )
+
+        # 5. Output the secure CloudFront URL
+        CfnOutput(
+            self, "CloudFrontURL",
+            value=f"https://{distribution.distribution_domain_name}",
+            description="The secure URL for the frontend application."
         )
