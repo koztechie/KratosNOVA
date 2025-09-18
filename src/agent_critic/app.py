@@ -2,8 +2,8 @@
 Lambda function for the Critic Agent.
 
 This function is triggered by a DynamoDB Stream from the Submissions table.
-It evaluates all submissions for a contract once the first submission arrives
-and updates the system state.
+It evaluates all submissions for a contract, considering agent reputation,
+selects a winner using an LLM, and updates the system state in DynamoDB.
 """
 import json
 import os
@@ -31,29 +31,21 @@ results_table = dynamodb.Table(RESULTS_TABLE_NAME)
 
 
 def handler(event, context):
-    """
-    Main handler for the Critic Agent, triggered by DynamoDB Streams.
-    """
+    """Main handler for the Critic Agent, triggered by DynamoDB Streams."""
     _ = context
     print(f"Critic triggered by DynamoDB Stream: {json.dumps(event)}")
 
-    # A stream can deliver multiple records in one event
     for record in event.get("Records", []):
-        # We only care about new submissions being created
         if record.get("eventName") == "INSERT":
             try:
-                # Extract the contract_id from the newly inserted submission item
                 new_image = record.get("dynamodb", {}).get("NewImage", {})
                 contract_id_obj = new_image.get("contract_id", {})
                 contract_id = contract_id_obj.get("S")
 
                 if contract_id:
                     print(f"Processing new submission for contract_id: {contract_id}")
-                    # Run the full evaluation logic for this contract
                     process_evaluation(contract_id)
-
             except Exception as e:
-                # Log the error but don't stop processing other records
                 print(f"Error processing a stream record: {e}")
                 print(f"Problematic record: {record}")
 
@@ -64,29 +56,27 @@ def process_evaluation(contract_id: str):
     a winner, and updates the state of the entire system.
     """
     try:
-        # First, check if the contract is already closed to avoid duplicate processing
         contract = get_contract(contract_id)
         if contract.get("status") == "CLOSED":
             print(f"Contract {contract_id} is already closed. No action needed.")
             return
 
-        # Step 1: Fetch all submissions for the contract
         submissions = get_submissions_for_contract(contract_id)
         if not submissions:
-            print(f"No submissions found for contract {contract_id}. This should not happen if triggered by an insert.")
+            print(f"No submissions found for contract {contract_id}.")
             return
         print(f"Found {len(submissions)} submissions for evaluation.")
 
-        # Step 2: Invoke Bedrock to select a winner
-        winning_result = select_winner(contract, submissions)
+        enriched_submissions = enrich_submissions_with_reputation(submissions)
+
+        winning_result = select_winner(contract, enriched_submissions)
         winning_submission_id = winning_result.get("winning_submission_id")
         if not winning_submission_id:
             raise ValueError("Critic model failed to return a winning_submission_id.")
         print(f"Bedrock selected winner: {winning_submission_id}")
 
-        # Step 3: Update the system state in DynamoDB
         winner_submission_item = next(
-            (sub for sub in submissions if sub.get('submission_id') == winning_submission_id),
+            (sub for sub in enriched_submissions if sub.get('submission_id') == winning_submission_id),
             None
         )
         if winner_submission_item:
@@ -98,10 +88,39 @@ def process_evaluation(contract_id: str):
         
         update_contract_status(contract_id, "CLOSED")
         print(f"Successfully processed and closed contract {contract_id}.")
-
     except (ValueError, ClientError) as e:
         print(f"Error during evaluation for contract {contract_id}: {e}")
-        # For production, consider sending this to a Dead Letter Queue (DLQ)
+
+
+def enrich_submissions_with_reputation(submissions: list) -> list:
+    """
+    Fetches the reputation for each agent who made a submission using an
+    efficient batch_get_item call.
+    """
+    agent_ids = {sub.get("agent_id") for sub in submissions if sub.get("agent_id")}
+    if not agent_ids:
+        return submissions
+
+    try:
+        response = dynamodb.batch_get_item(
+            RequestItems={
+                AGENTS_TABLE_NAME: {
+                    'Keys': [{'agent_id': agent_id} for agent_id in agent_ids]
+                }
+            }
+        )
+        agents_data = response.get('Responses', {}).get(AGENTS_TABLE_NAME, [])
+        reputation_map = {agent['agent_id']: agent.get('reputation', 0) for agent in agents_data}
+
+        for sub in submissions:
+            sub['agent_reputation'] = reputation_map.get(sub.get('agent_id'), 0)
+        
+        return submissions
+    except ClientError as e:
+        print(f"Warning: Could not fetch agent reputations. Proceeding without it. Error: {e}")
+        for sub in submissions:
+            sub['agent_reputation'] = 0
+        return submissions
 
 
 def get_submissions_for_contract(contract_id: str) -> list:
@@ -131,7 +150,10 @@ def get_contract(contract_id: str) -> dict:
 
 
 def select_winner(contract: dict, submissions: list) -> dict:
-    """Uses Claude 3 Sonnet to evaluate submissions and select a winner."""
+    """
+    Uses Claude 3 Sonnet to evaluate submissions and select a winner,
+    now considering agent reputation as a tie-breaker.
+    """
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
     submissions_text = ""
     for sub in submissions:
@@ -139,6 +161,7 @@ def select_winner(contract: dict, submissions: list) -> dict:
             f"<submission>\n"
             f"  <id>{sub.get('submission_id')}</id>\n"
             f"  <content>{sub.get('submission_data')}</content>\n"
+            f"  <author_reputation>{sub.get('agent_reputation', 0)}</author_reputation>\n"
             f"</submission>\n"
         )
     prompt = f"""
@@ -152,15 +175,17 @@ def select_winner(contract: dict, submissions: list) -> dict:
     </brief>
 
     **Submissions to Evaluate:**
+    Each submission includes the content and the reputation score of the agent who created it.
     <submissions>
     {submissions_text}
     </submissions>
 
     **Your Instructions:**
     1.  Carefully review the Creative Brief.
-    2.  Evaluate each submission based on its relevance, creativity, and quality.
-    3.  Choose the ONE submission that is the absolute best fit for the brief.
-    4.  Provide a brief, constructive justification for your choice.
+    2.  Evaluate each submission primarily on its relevance, creativity, and quality.
+    3.  If two or more submissions are of very similar high quality, give a slight preference to the submission from the agent with a higher `author_reputation` score.
+    4.  Choose the ONE submission that represents the absolute best final choice.
+    5.  Provide a brief, constructive justification for your choice.
 
     Respond with ONLY a single, raw JSON object in the following format. Do not include any text before or after the JSON object.
     {{

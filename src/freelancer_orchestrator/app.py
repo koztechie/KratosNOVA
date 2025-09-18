@@ -15,10 +15,13 @@ lambda_client = boto3.client("lambda")
 # Get configuration from environment variables
 API_BASE_URL = os.environ.get("API_BASE_URL")
 
+ANALYST_AGENT_ARN = os.environ.get("ANALYST_AGENT_ARN")
+
 # Create a mapping from contract type to Agent ARN for easy extension
 AGENT_MAPPING = {
     "IMAGE": os.environ.get("ARTIST_AGENT_ARN"),
-    "TEXT": os.environ.get("COPYWRITER_AGENT_ARN")
+    "TEXT": os.environ.get("COPYWRITER_AGENT_ARN"),
+    "RESEARCH": ANALYST_AGENT_ARN
 }
 
 

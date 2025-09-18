@@ -2,14 +2,16 @@
 Lambda function for the Agent-Manager.
 
 This function handles the POST /goals endpoint. It uses a Large Language Model
-to deconstruct a high-level user goal into a series of actionable, structured
-contracts, and then persists these contracts to the DynamoDB table, effectively
-opening them on the marketplace for freelancer agents.
+with Chain-of-Thought prompting to deconstruct a high-level user goal into a
+series of actionable, structured contracts, and then persists these contracts
+to the DynamoDB table.
 """
 import json
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal  # <-- ВИПРАВЛЕНО: Додано відсутній імпорт
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -71,47 +73,52 @@ def handler(event, context):
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
             "body": json.dumps({"error": str(e)})
         }
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+    except ClientError as e:
+        print(f"An unexpected AWS error occurred: {e}")
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": "Could not process the goal."})
+            "body": json.dumps({"error": "Could not process the goal due to an internal error."})
         }
 
 
 def deconstruct_goal_into_contracts(goal_description: str) -> list:
     """
-    Uses Claude 3 Sonnet to break down a high-level goal into a list of
-    structured contracts for the KratosNOVA marketplace.
+    Uses Claude 3 Sonnet with Chain-of-Thought prompting to break down a
+    high-level goal into a list of structured contracts.
     """
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
-    
-    # Refined prompt for better reliability and stricter output formatting
+
     prompt = f"""
     You are the Agent-Manager of the KratosNOVA system, a highly-structured marketplace for AI agents.
-    Your primary function is to deconstruct a high-level user goal into a series of precise, machine-readable contracts.
-    You must be very strict and adhere to the specified output format.
+    Your primary function is to deconstruct a high-level user goal into a series of precise, machine-readable contracts and allocate a budget for each.
 
-    Available agent specializations (contract_type):
-    - "IMAGE": For tasks involving generating visual content like logos, posters, or illustrations.
-    - "TEXT": For tasks involving generating textual content like slogans, descriptions, or summaries.
+    **Follow this process:**
+    1.  **Think step-by-step**: Inside a <scratchpad> block, analyze the user's goal. Break it down into fundamental needs. Identify the distinct creative assets required. For each asset, determine the most appropriate `contract_type`. Formulate a clear and detailed prompt (description) for the specialist agent. Finally, decide on a fair budget allocation for each task from a total pool of 100 credits, considering its complexity.
+    2.  **Format the output**: After your analysis in the scratchpad, generate a single, raw JSON object. This object must contain one key: "contracts", whose value is a list of the contract objects you designed.
 
-    User Goal: "{goal_description}"
+    **Total available budget for this goal is 100 credits.**
 
-    Your task is to analyze the user's goal and create a list of contracts. For each distinct task you identify,
-    create one contract object. Each contract object must contain:
+    **Available agent specializations (contract_type) and their relative complexity:**
+    - "IMAGE": A complex and valuable task (should receive a significant portion of the budget).
+    - "RESEARCH": An important, foundational task (should receive a medium to high portion of the budget).
+    - "TEXT": A standard, less complex task (should receive a smaller portion of the budget).
+
+    **User Goal:** "{goal_description}"
+
+    **Your task is to analyze the user's goal and create a list of contracts. Each contract object must contain:**
     1.  `title`: A short, descriptive title for the task.
     2.  `description`: A detailed prompt for the specialist agent who will perform the task.
-    3.  `contract_type`: Must be either "IMAGE" or "TEXT".
+    3.  `contract_type`: Must be one of "IMAGE", "TEXT", or "RESEARCH".
+    4.  `budget`: A number (integer) representing the portion of the 100 credits you allocate to this task. The sum of all budgets should logically not exceed 100.
 
-    Respond with ONLY a single, raw JSON object. The object must contain one key: "contracts", whose value is a list of the contract objects you created.
-    Do not include any explanatory text, markdown formatting (like ```json), or any words before or after the JSON object.
+    **Your Response:**
+    Your final output MUST contain ONLY the raw JSON object. Do not include the <scratchpad> block or any other text outside of the final JSON structure.
     """
 
     request_body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 2048,
+        "max_tokens": 4096,
         "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     }
 
@@ -124,16 +131,16 @@ def deconstruct_goal_into_contracts(goal_description: str) -> list:
         )
         response_body = json.loads(response.get("body").read())
         generated_text = response_body.get("content")[0].get("text")
-        
-        # Improved JSON Parsing Logic
+
+        print(f"Raw model response including scratchpad (if any):\n---\n{generated_text}\n---")
+
         json_start_index = generated_text.find('{')
         if json_start_index == -1:
             raise ValueError("No JSON object found in the model's response.")
-        
+
         json_str = generated_text[json_start_index:]
-        
         parsed_response = json.loads(json_str)
-        
+
         if "contracts" not in parsed_response or not isinstance(parsed_response["contracts"], list):
             raise ValueError("The 'contracts' key (a list) is missing in the parsed JSON.")
 
@@ -153,8 +160,7 @@ def save_contracts_to_db(contracts: list, goal_id: str):
 
     with contracts_table.batch_writer() as batch:
         for contract in contracts:
-            # Basic validation for the contract structure from the LLM
-            if not all(k in contract for k in ["title", "description", "contract_type"]):
+            if not all(k in contract for k in ["title", "description", "contract_type", "budget"]):
                 print(f"Skipping malformed contract from LLM: {contract}")
                 continue
 
@@ -165,6 +171,7 @@ def save_contracts_to_db(contracts: list, goal_id: str):
                 "created_at": timestamp,
                 "title": contract["title"],
                 "description": contract["description"],
-                "contract_type": contract["contract_type"]
+                "contract_type": contract["contract_type"],
+                "budget": Decimal(str(contract.get("budget", 0)))
             }
             batch.put_item(Item=item)

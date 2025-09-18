@@ -20,6 +20,7 @@ This document outlines the data structures for the DynamoDB tables used in the K
 | contract_type   | String          | The type of work required. Allowed values: `IMAGE`, `TEXT`.          | `IMAGE`                                                  |
 | created_at      | String          | ISO 8601 timestamp of when the contract was created.                 | `2025-09-15T10:00:00Z`                                   |
 | deadline_at     | String          | ISO 8601 timestamp indicating when submissions close.                | `2025-09-15T10:05:00Z`                                   |
+| budget          | Number          | The virtual budget allocated for this contract's execution.          | 50                                                       |
 
 ---
 
