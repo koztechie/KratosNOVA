@@ -72,3 +72,15 @@ This document outlines the data structures for the DynamoDB tables used in the K
   | submission_data | String | The actual winning content (S3 key or text). |
   | contract_type | String | The type of the contract (`IMAGE` or `TEXT`). |
   | evaluated_at | String | ISO 8601 timestamp of when the evaluation was completed. |
+
+## 5. `BedrockCache` Table
+
+**Purpose:** Stores responses from expensive Bedrock calls to reduce costs and latency on repeated requests.
+
+- **Table Name:** `KratosNOVA-BedrockCache`
+- **Primary Key:** `prompt_hash` (Partition Key)
+  | Attribute Name | Data Type | Description |
+  |---|---|---|
+  | **prompt_hash** | **String (PK)**| SHA256 hash of the full prompt sent to Bedrock. |
+  | response | String | The stringified JSON response from the Bedrock model. |
+  | created_at | String | ISO 8601 timestamp of when the cache entry was created. |

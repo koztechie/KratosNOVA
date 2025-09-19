@@ -1,12 +1,19 @@
 """
 Lambda function for the Critic Agent.
 
-This function is triggered by a DynamoDB Stream from the Submissions table.
-It evaluates all submissions for a contract, considering agent reputation,
-selects a winner using an LLM, and updates the system state in DynamoDB.
+This function can be triggered by two sources:
+1.  A DynamoDB Stream from the Submissions table (automated evaluation).
+2.  A direct API Gateway call (manual evaluation for failed contracts).
+
+It evaluates submissions, selects a winner, and can reformulate contracts
+that received no submissions. It uses a DynamoDB-based cache to avoid
+redundant, expensive calls to the Bedrock API.
 """
 import json
 import os
+import uuid
+import time
+import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -23,54 +30,86 @@ CONTRACTS_TABLE_NAME = os.environ.get("CONTRACTS_TABLE_NAME")
 SUBMISSIONS_TABLE_NAME = os.environ.get("SUBMISSIONS_TABLE_NAME")
 AGENTS_TABLE_NAME = os.environ.get("AGENTS_TABLE_NAME")
 RESULTS_TABLE_NAME = os.environ.get("RESULTS_TABLE_NAME")
+BEDROCK_CACHE_TABLE_NAME = os.environ.get("BEDROCK_CACHE_TABLE_NAME")
 
 contracts_table = dynamodb.Table(CONTRACTS_TABLE_NAME)
 submissions_table = dynamodb.Table(SUBMISSIONS_TABLE_NAME)
 agents_table = dynamodb.Table(AGENTS_TABLE_NAME)
 results_table = dynamodb.Table(RESULTS_TABLE_NAME)
+bedrock_cache_table = dynamodb.Table(BEDROCK_CACHE_TABLE_NAME)
 
 
 def handler(event, context):
-    """Main handler for the Critic Agent, triggered by DynamoDB Streams."""
-    _ = context
-    print(f"Critic triggered by DynamoDB Stream: {json.dumps(event)}")
-
-    for record in event.get("Records", []):
-        if record.get("eventName") == "INSERT":
-            try:
-                new_image = record.get("dynamodb", {}).get("NewImage", {})
-                contract_id_obj = new_image.get("contract_id", {})
-                contract_id = contract_id_obj.get("S")
-
-                if contract_id:
-                    print(f"Processing new submission for contract_id: {contract_id}")
-                    process_evaluation(contract_id)
-            except Exception as e:
-                print(f"Error processing a stream record: {e}")
-                print(f"Problematic record: {record}")
-
-
-def process_evaluation(contract_id: str):
     """
-    The core logic for evaluating a contract. Fetches submissions, selects
-    a winner, and updates the state of the entire system.
+    Main handler that routes requests based on the trigger source.
+    """
+    _ = context
+    print(f"Critic Agent triggered with event: {json.dumps(event)}")
+
+    # Route based on trigger source
+    if "Records" in event:  # Triggered by DynamoDB Stream
+        for record in event.get("Records", []):
+            if record.get("eventName") == "INSERT":
+                try:
+                    new_image = record.get("dynamodb", {}).get("NewImage", {})
+                    contract_id_obj = new_image.get("contract_id", {})
+                    contract_id = contract_id_obj.get("S")
+                    if contract_id:
+                        print(f"Processing new submission for contract_id: {contract_id}")
+                        process_evaluation(contract_id)
+                except (ValueError, ClientError) as e:
+                    print(f"Error processing a stream record: {e}")
+                    print(f"Problematic record: {record}")
+        return {"statusCode": 200, "body": "Stream event processed."}
+
+    if "httpMethod" in event:  # Triggered by API Gateway
+        if event["httpMethod"] == "POST":
+            path_params = event.get("pathParameters", {})
+            contract_id = path_params.get("contract_id")
+            if contract_id:
+                print(f"Manual evaluation triggered for contract: {contract_id}")
+                return process_evaluation(contract_id)
+
+    return {
+        "statusCode": 400,
+        "body": json.dumps({"error": "Unknown trigger or invalid request."})
+    }
+
+
+def process_evaluation(contract_id: str) -> dict:
+    """
+    The core logic for evaluating a contract. Fetches submissions, selects a
+    winner, or reformulates the contract if no submissions are found.
+    Returns a dict suitable for an API Gateway response.
     """
     try:
         contract = get_contract(contract_id)
-        if contract.get("status") == "CLOSED":
-            print(f"Contract {contract_id} is already closed. No action needed.")
-            return
+        if contract.get("status") != "OPEN":
+            message = (f"Contract {contract_id} is not OPEN "
+                       f"(current status: {contract.get('status')}). No action taken.")
+            print(message)
+            return {"statusCode": 200, "body": json.dumps({"message": message})}
 
         submissions = get_submissions_for_contract(contract_id)
+
         if not submissions:
-            print(f"No submissions found for contract {contract_id}.")
-            return
+            print(f"No submissions found for contract {contract_id}. Initiating reformulation.")
+            new_contract = reformulate_and_repost_contract(contract)
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                "body": json.dumps({
+                    "message": "Contract had no submissions and was reformulated.",
+                    "original_contract_id": contract_id,
+                    "new_contract": new_contract
+                })
+            }
+
         print(f"Found {len(submissions)} submissions for evaluation.")
-
         enriched_submissions = enrich_submissions_with_reputation(submissions)
-
         winning_result = select_winner(contract, enriched_submissions)
         winning_submission_id = winning_result.get("winning_submission_id")
+
         if not winning_submission_id:
             raise ValueError("Critic model failed to return a winning_submission_id.")
         print(f"Bedrock selected winner: {winning_submission_id}")
@@ -85,11 +124,22 @@ def process_evaluation(contract_id: str):
             if winning_agent_id:
                 update_agent_reputation(winning_agent_id, 1)
             save_final_result(contract.get("goal_id"), contract, winner_submission_item)
-        
+
         update_contract_status(contract_id, "CLOSED")
         print(f"Successfully processed and closed contract {contract_id}.")
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({
+                "message": "Successfully selected a winner and updated system state.",
+                "winning_submission_id": winning_submission_id
+            })
+        }
+
     except (ValueError, ClientError) as e:
         print(f"Error during evaluation for contract {contract_id}: {e}")
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
 
 
 def enrich_submissions_with_reputation(submissions: list) -> list:
@@ -105,12 +155,14 @@ def enrich_submissions_with_reputation(submissions: list) -> list:
         response = dynamodb.batch_get_item(
             RequestItems={
                 AGENTS_TABLE_NAME: {
-                    'Keys': [{'agent_id': agent_id} for agent_id in agent_ids]
+                    'Keys': [{'agent_id': agent_id} for agent_id in list(agent_ids)]
                 }
             }
         )
         agents_data = response.get('Responses', {}).get(AGENTS_TABLE_NAME, [])
-        reputation_map = {agent['agent_id']: agent.get('reputation', 0) for agent in agents_data}
+        reputation_map = {
+            agent['agent_id']: agent.get('reputation', 0) for agent in agents_data
+        }
 
         for sub in submissions:
             sub['agent_reputation'] = reputation_map.get(sub.get('agent_id'), 0)
@@ -121,6 +173,73 @@ def enrich_submissions_with_reputation(submissions: list) -> list:
         for sub in submissions:
             sub['agent_reputation'] = 0
         return submissions
+
+
+def reformulate_and_repost_contract(original_contract: dict) -> dict:
+    """
+    Takes a failed contract, uses an LLM to improve its description,
+    and creates a new contract on the marketplace. This operation is cached.
+    """
+    contract_id = original_contract.get("contract_id")
+    print(f"Reformulating contract: {contract_id}")
+    
+    model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
+    old_description = original_contract.get("description", "")
+    
+    prompt = f"""
+    You are a Creative Director tasked with improving a task description that failed to attract any submissions from AI agents.
+    The original description was:
+    <original_description>
+    {old_description}
+    </original_description>
+
+    Your job is to rewrite this description to be clearer, more engaging, and more appealing to a creative AI agent.
+    Focus on providing more context, better examples, or a more inspiring tone.
+    Respond with ONLY the new description text, without any preamble.
+    """
+    
+    # --- Caching Logic ---
+    prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+    try:
+        cache_response = bedrock_cache_table.get_item(Key={'prompt_hash': prompt_hash})
+        if 'Item' in cache_response:
+            print("CACHE HIT! Returning stored reformulation.")
+            new_description = cache_response['Item']['response']
+        else:
+            print("CACHE MISS. Calling Bedrock for reformulation...")
+            request_body = {
+                "anthropic_version": "bedrock-2023-05-31", "max_tokens": 2048,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            }
+            response = bedrock_runtime.invoke_model(body=json.dumps(request_body), modelId=model_id)
+            response_body = json.loads(response.get("body").read())
+            new_description = response_body.get("content")[0].get("text")
+            
+            ttl = int(time.time()) + (24 * 60 * 60)
+            bedrock_cache_table.put_item(
+                Item={'prompt_hash': prompt_hash, 'response': new_description, 'ttl': ttl}
+            )
+    except (ClientError, json.JSONDecodeError, ValueError) as e:
+        print(f"Cache or Bedrock error during reformulation: {e}. Using original description.")
+        new_description = old_description + " (reformulation failed, please try again)"
+    
+    update_contract_status(contract_id, "FAILED_REPOSTED")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    new_contract_item = {
+        "contract_id": f"contract-{uuid.uuid4()}",
+        "goal_id": original_contract.get("goal_id"),
+        "status": "OPEN",
+        "created_at": timestamp,
+        "title": original_contract.get("title") + " (V2)",
+        "description": new_description,
+        "contract_type": original_contract.get("contract_type"),
+        "budget": original_contract.get("budget", Decimal('0'))
+    }
+    
+    contracts_table.put_item(Item=new_contract_item)
+    print(f"Successfully created new contract: {new_contract_item['contract_id']}")
+    return new_contract_item
 
 
 def get_submissions_for_contract(contract_id: str) -> list:
@@ -151,8 +270,8 @@ def get_contract(contract_id: str) -> dict:
 
 def select_winner(contract: dict, submissions: list) -> dict:
     """
-    Uses Claude 3 Sonnet to evaluate submissions and select a winner,
-    now considering agent reputation as a tie-breaker.
+    Uses Claude 3 Sonnet to evaluate submissions and select a winner.
+    This operation is cached to prevent re-evaluation of the same set of submissions.
     """
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
     submissions_text = ""
@@ -193,20 +312,44 @@ def select_winner(contract: dict, submissions: list) -> dict:
       "justification": "<Your brief reason for choosing the winner>"
     }}
     """
+
+    # --- Caching Logic ---
+    prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+    try:
+        cache_response = bedrock_cache_table.get_item(Key={'prompt_hash': prompt_hash})
+        if 'Item' in cache_response:
+            print("CACHE HIT! Returning stored winner selection.")
+            return json.loads(cache_response['Item']['response'])
+    except ClientError as e:
+        print(f"Cache read error: {e}")
+
+    print("CACHE MISS. Calling Bedrock for winner selection...")
     request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 2048,
+        "anthropic_version": "bedrock-2023-05-31", "max_tokens": 2048,
         "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     }
     try:
         response = bedrock_runtime.invoke_model(body=json.dumps(request_body), modelId=model_id)
         response_body = json.loads(response.get("body").read())
         generated_text = response_body.get("content")[0].get("text")
+        
         json_start_index = generated_text.find('{')
         if json_start_index == -1:
             raise ValueError("No JSON object found in the model's response.")
         json_str = generated_text[json_start_index:]
-        return json.loads(json_str)
+        result = json.loads(json_str)
+
+        # Save the new result to cache
+        ttl = int(time.time()) + (24 * 60 * 60)  # 24 hour TTL
+        bedrock_cache_table.put_item(
+            Item={
+                'prompt_hash': prompt_hash,
+                'response': json.dumps(result),
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'ttl': ttl
+            }
+        )
+        return result
     except (ClientError, json.JSONDecodeError, ValueError) as e:
         print(f"Error selecting winner via Bedrock: {e}")
         raise ValueError(f"Failed to select a winner. Details: {e}") from e

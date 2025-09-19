@@ -1,22 +1,70 @@
+"""
+Lambda function for managing Agents.
+
+This function can be triggered by two API endpoints:
+1.  POST /agents: Registers a new agent in the system.
+2.  GET /agents/leaderboard: Returns a list of all agents, sorted by reputation.
+"""
 import json
 import os
-import boto3
 from datetime import datetime, timezone
+from decimal import Decimal
 
-# Initialize AWS clients outside the handler for performance
+import boto3
+from botocore.exceptions import ClientError
+
+# Initialize AWS clients outside the handler for performance optimization
 dynamodb = boto3.resource("dynamodb")
 AGENTS_TABLE_NAME = os.environ.get("AGENTS_TABLE_NAME")
 agents_table = dynamodb.Table(AGENTS_TABLE_NAME)
 
+
+class DecimalEncoder(json.JSONEncoder):
+    """Helper class to convert a DynamoDB item's Decimal types to JSON."""
+    def default(self, o):
+        if isinstance(o, Decimal):
+            if o % 1 > 0:
+                return float(o)
+            return int(o)
+        return super(DecimalEncoder, self).default(o)
+
+
 def handler(event, context):
     """
-    Handler for POST /agents endpoint.
-    Registers a new agent in the system.
+    Main handler that routes requests based on HTTP method and path.
     """
-    print(f"Received event: {json.dumps(event)}")
+    _ = context
+    http_method = event.get("httpMethod")
+    path = event.get("path", "")
+
+    print(f"Agents Manager triggered for {http_method} {path}")
 
     try:
-        # 1. Parse and validate input from the event body
+        if http_method == "POST" and path.endswith("/agents"):
+            return register_agent(event)
+        if http_method == "GET" and path.endswith("/leaderboard"):
+            return get_leaderboard(event)
+
+        return {
+            "statusCode": 404,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"error": "Not Found"})
+        }
+    except ClientError as e:
+        print(f"An AWS error occurred: {e}")
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"error": "An internal server error occurred."})
+        }
+
+
+def register_agent(event):
+    """
+    Handles the logic for the POST /agents endpoint.
+    Registers a new agent in the system.
+    """
+    try:
         body = json.loads(event.get("body", "{}"))
         agent_id = body.get("agent_id")
         agent_type = body.get("agent_type")
@@ -24,10 +72,10 @@ def handler(event, context):
         if not agent_id or not agent_type:
             raise ValueError("Both 'agent_id' and 'agent_type' are required.")
 
-        if agent_type not in ["ARTIST", "COPYWRITER"]:
-            raise ValueError("'agent_type' must be either 'ARTIST' or 'COPYWRITER'.")
+        # Allow any type for future extensibility, but validate it's a string
+        if not isinstance(agent_type, str):
+             raise ValueError("'agent_type' must be a string.")
 
-        # 2. Prepare the item for DynamoDB
         timestamp = datetime.now(timezone.utc).isoformat()
         
         item = {
@@ -38,17 +86,15 @@ def handler(event, context):
             "last_active_at": timestamp
         }
 
-        # 3. Write the item to the Agents table
         agents_table.put_item(Item=item)
 
-        # 4. Return a success response
         response_body = {
             "message": "Agent registered successfully",
             "agent": item
         }
         
         return {
-            "statusCode": 201, # 201 Created
+            "statusCode": 201,  # 201 Created
             "headers": {
                 "Content-Type": "application/json",
                 "Access-Control-Allow-Origin": "*"
@@ -56,18 +102,35 @@ def handler(event, context):
             "body": json.dumps(response_body)
         }
 
-    except (ValueError, TypeError) as e:
-        # Handle validation errors
+    except (ValueError, TypeError, json.JSONDecodeError) as e:
         return {
-            "statusCode": 400, # Bad Request
+            "statusCode": 400,  # Bad Request
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
             "body": json.dumps({"error": str(e)})
         }
-    except Exception as e:
-        # Handle other unexpected errors
-        print(f"Error registering agent: {e}")
-        return {
-            "statusCode": 500, # Internal Server Error
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": "Could not register the agent."})
-        }
+
+
+def get_leaderboard(event):
+    """
+    Handles the logic for the GET /agents/leaderboard endpoint.
+    Scans the Agents table and returns all agents, sorted by reputation.
+    """
+    print("Fetching agent leaderboard...")
+    response = agents_table.scan()
+    agents = response.get("Items", [])
+    
+    # Handle pagination if the table grows large in the future
+    while 'LastEvaluatedKey' in response:
+        response = agents_table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+        agents.extend(response.get("Items", []))
+
+    # Sort agents by reputation in descending order
+    sorted_agents = sorted(agents, key=lambda x: x.get('reputation', 0), reverse=True)
+    
+    print(f"Found {len(sorted_agents)} agents.")
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "body": json.dumps({"agents": sorted_agents}, cls=DecimalEncoder)
+    }
