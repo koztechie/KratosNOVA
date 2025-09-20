@@ -67,14 +67,16 @@ def start_new_conversation(event):
     
     if analysis.get("is_sufficient"):
         print("Prompt is sufficient. Sending directly to deconstruction queue.")
+        # Generate a new goal_id for this direct request
+        goal_id = f"goal-{uuid.uuid4()}"
         sqs.send_message(
             QueueUrl=QUEUE_URL,
-            MessageBody=json.dumps({"description": initial_prompt})
+            MessageBody=json.dumps({"description": initial_prompt, "goal_id": goal_id})
         )
         return {
             "statusCode": 202, # Accepted for processing
             "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"message": "Goal accepted for processing."})
+            "body": json.dumps({"message": "Goal accepted for processing.", "goal_id": goal_id})
         }
     
     # If the prompt is not sufficient, start a conversation
@@ -97,30 +99,40 @@ def start_new_conversation(event):
 def continue_conversation(event):
     """
     Handles subsequent messages in a conversation (POST /goals/conversation/{id}).
-    (This is a placeholder for the hackathon MVP).
+    Combines the conversation history and sends the final goal to the SQS queue.
     """
-    # In a full implementation, you would:
-    # 1. Get the conversation ID from pathParameters.
-    # 2. Load the conversation history (e.g., from DynamoDB or passed from the client).
-    # 3. Add the user's new message to the history.
-    # 4. Call an LLM with the full history to decide the next step.
-    # 5. Either ask another question or send the completed goal to the SQS queue.
-    print("Continue conversation logic is not fully implemented for this MVP.")
-    
+    print("Continuing conversation...")
     body = json.loads(event.get("body", "{}"))
+    conversation_id = event.get("pathParameters", {}).get("conversation_id")
     
-    # Simulate sending to queue after one clarification
-    full_description = " ".join([msg['content'] for msg in body.get('history', [])])
+    history = body.get("history", [])
+    new_message = body.get("message", "")
     
+    if not new_message:
+        raise ValueError("The 'message' field is required for continuing a conversation.")
+
+    # Combine all user inputs into a single, detailed description
+    full_description_parts = [msg.get("content") for msg in history if msg.get("role") == "user"]
+    full_description_parts.append(new_message)
+    full_description = " ".join(full_description_parts)
+    
+    print(f"Full, combined description: '{full_description}'")
+    print("Sending combined goal to deconstruction queue...")
+    
+    # Send the final, detailed prompt to the SQS queue for processing.
+    # The conversation_id now becomes the goal_id.
     sqs.send_message(
         QueueUrl=QUEUE_URL,
-        MessageBody=json.dumps({"description": full_description})
+        MessageBody=json.dumps({"description": full_description, "goal_id": conversation_id})
     )
     
     return {
-        "statusCode": 202,
+        "statusCode": 202, # Accepted for processing
         "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-        "body": json.dumps({"message": "Thank you for the details! Your goal is now being processed."})
+        "body": json.dumps({
+            "message": "Thank you for the details! Your goal is now being processed.",
+            "goal_id": conversation_id # This is the ID the frontend will poll
+        })
     }
 
 
@@ -129,7 +141,7 @@ def analyze_initial_prompt(prompt: str) -> dict:
     Uses a Bedrock LLM to analyze if a prompt is detailed enough to act on.
     If not, it generates a clarifying question.
     """
-    model_id = "anthropic.claude-3-haiku-20240307-v1:0" # Use fast Haiku for this analysis
+    model_id = "anthropic.claude-3-haiku-20240307-v1:0"
 
     analysis_prompt = f"""
     You are an AI assistant that analyzes user requests. Your task is to determine if a user's goal description is detailed enough to be broken down into concrete tasks for creative AI agents (like generating a logo, a slogan, or doing research).
@@ -164,7 +176,6 @@ def analyze_initial_prompt(prompt: str) -> dict:
         response_body = json.loads(response.get("body").read())
         generated_text = response_body.get("content")[0].get("text")
         
-        # Robust JSON parsing
         json_start_index = generated_text.find('{')
         if json_start_index == -1:
             raise ValueError("No JSON object found in the analysis model's response.")
