@@ -8,8 +8,10 @@ other stacks in this project.
 from aws_cdk import (
     Stack,
     RemovalPolicy,
+    Duration,  # <-- ВИПРАВЛЕНО: Додано відсутній імпорт
     aws_dynamodb as dynamodb,
-    aws_s3 as s3
+    aws_s3 as s3,
+    aws_sqs as sqs
 )
 from constructs import Construct
 
@@ -17,7 +19,7 @@ from constructs import Construct
 class KratosNovaFoundationStack(Stack):
     """
     Defines the foundational data storage resources for the application:
-    S3 bucket for artifacts and DynamoDB tables for state management.
+    S3 bucket, DynamoDB tables, and the SQS queue for decoupling.
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
@@ -71,7 +73,6 @@ class KratosNovaFoundationStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # NEW: Table for storing final, selected results for each goal.
         self.results_table = dynamodb.Table(
             self, "ResultsTable",
             partition_key=dynamodb.Attribute(
@@ -84,7 +85,6 @@ class KratosNovaFoundationStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # ... після results_table
         self.bedrock_cache_table = dynamodb.Table(
             self, "BedrockCacheTable",
             partition_key=dynamodb.Attribute(
@@ -92,5 +92,13 @@ class KratosNovaFoundationStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
-            time_to_live_attribute="ttl" # Automatically delete old cache items
+            time_to_live_attribute="ttl"
+        )
+
+        # =================================================================
+        # ===================== SQS QUEUE ===============================
+        # =================================================================
+        self.goal_deconstruction_queue = sqs.Queue(
+            self, "GoalDeconstructionQueue",
+            visibility_timeout=Duration.seconds(90) # Should be > deconstructor's timeout
         )

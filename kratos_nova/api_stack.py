@@ -39,18 +39,29 @@ class KratosNovaApiStack(Stack):
             )
         )
         
+        # Grant permissions to access foundational data storage resources
         foundation_stack.artifacts_bucket.grant_read_write(api_lambda_role)
         foundation_stack.contracts_table.grant_read_write_data(api_lambda_role)
         foundation_stack.submissions_table.grant_read_write_data(api_lambda_role)
         foundation_stack.agents_table.grant_read_write_data(api_lambda_role)
         foundation_stack.results_table.grant_read_write_data(api_lambda_role)
         foundation_stack.bedrock_cache_table.grant_read_write_data(api_lambda_role)
+        foundation_stack.goal_deconstruction_queue.grant_send_messages(api_lambda_role)
 
+        # Grant permission for the Critic & Manager to invoke the Bedrock model
         api_lambda_role.add_to_policy(iam.PolicyStatement(
             actions=["bedrock:InvokeModel"],
             resources=[
-                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
             ],
+            effect=iam.Effect.ALLOW
+        ))
+
+        # Grant permission to publish custom CloudWatch metrics
+        api_lambda_role.add_to_policy(iam.PolicyStatement(
+            actions=["cloudwatch:PutMetricData"],
+            resources=["*"],
             effect=iam.Effect.ALLOW
         ))
         
@@ -72,7 +83,8 @@ class KratosNovaApiStack(Stack):
             "AGENTS_TABLE_NAME": foundation_stack.agents_table.table_name,
             "ARTIFACTS_BUCKET_NAME": foundation_stack.artifacts_bucket.bucket_name,
             "RESULTS_TABLE_NAME": foundation_stack.results_table.table_name,
-            "BEDROCK_CACHE_TABLE_NAME": foundation_stack.bedrock_cache_table.table_name
+            "BEDROCK_CACHE_TABLE_NAME": foundation_stack.bedrock_cache_table.table_name,
+            "GOAL_DECONSTRUCTION_QUEUE_URL": foundation_stack.goal_deconstruction_queue.queue_url
         }
 
         def create_lambda(name, folder, timeout=Duration.seconds(5)):
@@ -82,7 +94,7 @@ class KratosNovaApiStack(Stack):
                 environment=api_lambda_env, layers=[self.common_layer], timeout=timeout
             )
 
-        goals_handler = create_lambda("GoalsHandler", "goals_manager", timeout=Duration.seconds(30))
+        goals_handler = create_lambda("GoalsHandler", "goals_manager")
         contracts_handler = create_lambda("ContractsHandler", "contracts_manager")
         submissions_handler = create_lambda("SubmissionsHandler", "submissions_manager")
         results_handler = create_lambda("ResultsHandler", "results_manager")
@@ -116,6 +128,14 @@ class KratosNovaApiStack(Stack):
         goal_id_resource = goals_resource.add_resource("{goal_id}")
         goal_id_resource.add_method("GET", apigw.LambdaIntegration(results_handler))
 
+        # NEW ENDPOINT: POST /goals/conversation/{conversation_id}
+        conversation_resource = goals_resource.add_resource("conversation")
+        conversation_id_resource = conversation_resource.add_resource("{conversation_id}")
+        conversation_id_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(goals_handler) # Використовуємо ту саму функцію
+        )
+
         marketplace_resource = self.api.root.add_resource("marketplace")
         marketplace_resource.add_method("GET", apigw.LambdaIntegration(marketplace_handler))
 
@@ -134,7 +154,6 @@ class KratosNovaApiStack(Stack):
         agents_resource = self.api.root.add_resource("agents")
         agents_resource.add_method("POST", apigw.LambdaIntegration(agents_handler))
         
-        # NEW ENDPOINT: GET /agents/leaderboard
         leaderboard_resource = agents_resource.add_resource("leaderboard")
         leaderboard_resource.add_method("GET", apigw.LambdaIntegration(agents_handler))
         
