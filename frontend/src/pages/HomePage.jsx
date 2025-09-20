@@ -109,10 +109,16 @@ function HomePage() {
       const response = await apiClient.post(endpoint, payload);
       setUserInput(""); // Clear input after sending
 
-      if (response.status === 202 && response.data.goal_id) {
-        // Goal was accepted directly and we got a goal_id to poll
+      if (response.status === 202) {
+        // Goal was accepted for processing. Use the existing conversation ID for polling.
+        const pollId = conversation.id || response.data.goal_id;
+        if (!pollId) {
+          throw new Error(
+            "Backend accepted the goal but did not provide an ID to track."
+          );
+        }
         setConversation({
-          id: response.data.goal_id,
+          id: pollId,
           history: currentHistory,
           status: "processing",
         });
@@ -127,13 +133,15 @@ function HomePage() {
           status: "awaiting_user_input",
         });
       } else {
-        // Fallback for unexpected responses
+        // Fallback for unexpected but successful status codes
         throw new Error("Received an unexpected response from the server.");
       }
     } catch (err) {
       console.error("API Error:", err);
       const errorMessage =
-        err.response?.data?.error || "An unknown error occurred.";
+        err.response?.data?.error ||
+        err.message ||
+        "An unknown error occurred.";
       setError(errorMessage);
       setConversation((prev) => ({ ...prev, status: "error" }));
     } finally {
